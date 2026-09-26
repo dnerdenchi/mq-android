@@ -28,7 +28,8 @@ BondVPN は Android の `VpnService` 上で [mqvpn](https://github.com/mp0rta/mq
 このリポジトリでは Gradle wrapper が無い環境でも、ローカルに Gradle と JDK が入っていればビルドできます。Windows で Android Studio 付属 JBR を使う例です。
 
 ```powershell
-$env:JAVA_HOME="D:\Soft\AndroidStudio\jbr"
+# Android Studio 付属の JBR を使用する場合の例 (パスはご自身の環境に合わせて指定してください)
+$env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
 gradle assembleDebug
 ```
 
@@ -41,7 +42,7 @@ app/build/outputs/apk/debug/app-debug.apk
 テストも実行する場合:
 
 ```powershell
-$env:JAVA_HOME="D:\Soft\AndroidStudio\jbr"
+$env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
 gradle test assembleDebug
 ```
 
