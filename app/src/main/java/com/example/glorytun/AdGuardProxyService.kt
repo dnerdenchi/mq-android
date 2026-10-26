@@ -94,9 +94,13 @@ class AdGuardProxyService : MqvpnVpnService() {
                 null
             }
             val wifiBps = pairUpdate?.wifiBps ?: bandwidthSample?.perPathBps
-                ?.filterKeys { !isCellularInterface(it) }?.values?.sum() ?: 0L
+                ?.filterKeys(::isWifiInterface)?.values?.sum() ?: 0L
             val simBps = pairUpdate?.simBps ?: bandwidthSample?.perPathBps
                 ?.filterKeys(::isCellularInterface)?.values?.sum() ?: 0L
+            val bluetoothBps = bandwidthSample?.perPathBps
+                ?.filterKeys(::isBluetoothInterface)?.values?.sum() ?: 0L
+            val ethernetBps = bandwidthSample?.perPathBps
+                ?.filterKeys(::isEthernetInterface)?.values?.sum() ?: 0L
             val bandwidthStatus = bandwidthEnforcer.onTick(
                 latestPaths,
                 trafficUpdate.wifiDeltaKB,
@@ -110,6 +114,8 @@ class AdGuardProxyService : MqvpnVpnService() {
                 trafficUpdate.totals,
                 wifiBps,
                 simBps,
+                bluetoothBps,
+                ethernetBps,
                 pairUpdate?.pairShareBps ?: 0L,
                 pairUpdate?.receivingPeerNames ?: emptyList(),
             )
@@ -789,6 +795,8 @@ class AdGuardProxyService : MqvpnVpnService() {
         totals: NetworkTrafficTotals,
         wifiBps: Long,
         simBps: Long,
+        bluetoothBps: Long,
+        ethernetBps: Long,
         pairShareBps: Long,
         pairSharePeerNames: List<String>,
     ) {
@@ -797,11 +805,16 @@ class AdGuardProxyService : MqvpnVpnService() {
             putExtra("wifi_tx_bytes", totals.wifiTx)
             putExtra("wifi_rx_bytes", totals.wifiRx)
             putExtra("wifi_active", totals.wifiActive)
+            putExtra("wifi_path_active", totals.wifiPathActive)
             putExtra("sim_tx_bytes", totals.simTx)
             putExtra("sim_rx_bytes", totals.simRx)
             putExtra("sim_active", totals.simActive)
             putExtra("wifi_bps", wifiBps)
             putExtra("sim_bps", simBps)
+            putExtra("bluetooth_active", totals.bluetoothActive)
+            putExtra("bluetooth_bps", bluetoothBps)
+            putExtra("ethernet_active", totals.ethernetActive)
+            putExtra("ethernet_bps", ethernetBps)
             putExtra("pair_share_bps", pairShareBps)
             putStringArrayListExtra("pair_share_peer_names", ArrayList(pairSharePeerNames))
             putExtra("stats_source", GlorytunConstants.STATE_SOURCE_PROXY)

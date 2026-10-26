@@ -1,11 +1,12 @@
 # BondVPN Android
 
-BondVPN は Android の `VpnService` 上で [mqvpn](https://github.com/mp0rta/mqvpn) を動かす VPN アプリです。mqvpn は MASQUE CONNECT-IP と Multipath QUIC を使い、Wi-Fi やモバイル回線など複数の経路を 1 本の VPN トンネルとして扱えます。
+BondVPN は Android の `VpnService` 上で [mqvpn](https://github.com/mp0rta/mqvpn) を動かす VPN アプリです。mqvpn は MASQUE CONNECT-IP と Multipath QUIC を使い、Wi-Fi、モバイル回線、Bluetooth・USB テザリング、イーサネットなど複数の経路を 1 本の VPN トンネルとして扱えます。
 
 ## 特徴
 
 - Android の VPN 機能を使って mqvpn トンネルへ接続します。
-- mqvpn 公式 Android v0.16.0 と同じ Multipath QUIC を使い、Hybrid TCP lane と UDP reorder にも対応します。
+- mqvpn v0.18.0 の Multipath QUIC を使い、Hybrid TCP lane と UDP reorder に加えて、Bluetooth・USB・イーサネットのテザリング経路にも対応します。
+- ダッシュボードの経路別速度欄は、その経路が接続中の場合だけ表示します。ペア共有欄も Pair & Share の利用中だけ表示します。
 - 既定の「帯域集約モード」は公式推奨の `WLB` です。サーバー側も有効化した Hybrid `AUTO` と UDP 443 `CELLULAR_BOND` reorderで、TCP・QUICの多経路集約を補助します。
 - GitHub Releases の APK asset を参照するアプリ内更新機能を備えています。
 - 現在の native bridge は `arm64-v8a` 向けです。
@@ -14,14 +15,14 @@ BondVPN は Android の `VpnService` 上で [mqvpn](https://github.com/mp0rta/mq
 
 | 項目 | 内容 |
 | --- | --- |
-| VPN エンジン | mqvpn v0.16.0 |
+| VPN エンジン | mqvpn v0.18.0 |
 | Android 側 | Kotlin + mqvpn Android SDK source |
 | Native 側 | mqvpn Android 向け `libmqvpn_jni.so` |
 | 対応 ABI | `arm64-v8a` |
 | 最小 Android | API 26 |
 | アプリ更新 | GitHub Releases の APK asset |
 
-`libmqvpn_jni.so` は [mqvpn v0.16.0](https://github.com/mp0rta/mqvpn/releases/tag/v0.16.0) のソースに `native-patches/mqvpn-v0.16.0-path-rate-limit.patch` を適用してビルドしています。公式の Multipath QUIC 実装を維持しつつ、アプリの Wi-Fi/SIM 別帯域上限に必要な経路単位の送信制御を追加しています。アプリの「システム情報」には、ネイティブライブラリが返す実バージョンを表示します。
+`libmqvpn_jni.so` は [mqvpn v0.18.0](https://github.com/mp0rta/mqvpn/releases/tag/v0.18.0) のソースに `native-patches/mqvpn-v0.18.0-path-rate-limit.patch` を適用してビルドしています。JNI ブリッジとネイティブ reactor に経路単位の送受信上限を追加し、アプリの Wi-Fi/SIM 別帯域設定を維持しています。アプリの「システム情報」には、ネイティブライブラリが返す実バージョンを表示します。
 
 ## Android アプリのビルド
 

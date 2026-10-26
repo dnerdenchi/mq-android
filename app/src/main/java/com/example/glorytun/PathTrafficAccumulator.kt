@@ -8,7 +8,10 @@ data class NetworkTrafficTotals(
     val wifiActive: Boolean,
     val simTx: Long,
     val simRx: Long,
-    val simActive: Boolean
+    val simActive: Boolean,
+    val wifiPathActive: Boolean = wifiActive,
+    val bluetoothActive: Boolean = false,
+    val ethernetActive: Boolean = false,
 ) {
     val wifiTotal: Long get() = wifiTx + wifiRx
     val simTotal: Long get() = simTx + simRx
@@ -32,16 +35,24 @@ class PathTrafficAccumulator {
         var simDeltaBytes = 0L
         var wifiActive = false
         var simActive = false
+        var wifiPathActive = false
+        var bluetoothActive = false
+        var ethernetActive = false
         val activeHandles = mutableSetOf<Long>()
 
         paths.forEach { path ->
-            activeHandles.add(path.handle)
-
             val group = path.transportGroup()
-            if (group == TransportGroup.WIFI) {
-                wifiActive = true
-            } else {
-                simActive = true
+            val isPathAvailable = path.status != PathInfo.STATUS_CLOSED
+            if (isPathAvailable) {
+                activeHandles.add(path.handle)
+                if (group == TransportGroup.WIFI) {
+                    wifiActive = true
+                } else {
+                    simActive = true
+                }
+                wifiPathActive = wifiPathActive || isWifiInterface(path.iface)
+                bluetoothActive = bluetoothActive || isBluetoothInterface(path.iface)
+                ethernetActive = ethernetActive || isEthernetInterface(path.iface)
             }
 
             val current = PathCounter(
@@ -62,7 +73,11 @@ class PathTrafficAccumulator {
                     simDeltaBytes += deltaTx + deltaRx
                 }
             }
-            previousByHandle[path.handle] = current
+            if (isPathAvailable) {
+                previousByHandle[path.handle] = current
+            } else {
+                previousByHandle.remove(path.handle)
+            }
         }
 
         previousByHandle.keys.retainAll(activeHandles)
@@ -74,7 +89,10 @@ class PathTrafficAccumulator {
                 wifiActive = wifiActive,
                 simTx = cumulativeSimTx,
                 simRx = cumulativeSimRx,
-                simActive = simActive
+                simActive = simActive,
+                wifiPathActive = wifiPathActive,
+                bluetoothActive = bluetoothActive,
+                ethernetActive = ethernetActive,
             ),
             wifiDeltaKB = wifiDeltaBytes / 1024f,
             simDeltaKB = simDeltaBytes / 1024f
@@ -111,4 +129,22 @@ internal fun isCellularInterface(iface: String): Boolean {
         lower.startsWith("ccmni") ||
         lower.startsWith("wwan") ||
         lower.startsWith("pdp")
+}
+
+internal fun isWifiInterface(iface: String): Boolean {
+    val lower = iface.lowercase()
+    return lower.startsWith("wifi") || lower.startsWith("wlan") ||
+        lower.startsWith("wlp") || lower.startsWith("wl")
+}
+
+internal fun isBluetoothInterface(iface: String): Boolean {
+    val lower = iface.lowercase()
+    return lower.startsWith("bluetooth") || lower.startsWith("bnep") ||
+        lower.startsWith("bt-pan") || lower.startsWith("pan")
+}
+
+internal fun isEthernetInterface(iface: String): Boolean {
+    val lower = iface.lowercase()
+    return lower.startsWith("ethernet") || lower.startsWith("usb") ||
+        lower.startsWith("rndis") || lower.startsWith("eth") || lower.startsWith("en")
 }

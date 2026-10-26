@@ -1,70 +1,52 @@
 package com.mqvpn.sdk.network
 
+import android.net.NetworkCapabilities
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NetworkMonitorTest {
     @Test
-    fun usableWifiPathRequiresNotVpnCapability() {
-        val vpnBackedWifi = flags(hasNotVpn = false, hasWifi = true)
-
-        assertFalse(NetworkMonitor.isUsablePath(vpnBackedWifi))
+    fun classifiesWifiCellularEthernetAndBluetooth() {
+        assertEquals(
+            PathType.WIFI,
+            NetworkMonitor.classifyTransport(true, false, false, false),
+        )
+        assertEquals(
+            PathType.CELLULAR,
+            NetworkMonitor.classifyTransport(false, true, false, false),
+        )
+        assertEquals(
+            PathType.ETHERNET,
+            NetworkMonitor.classifyTransport(false, false, true, false),
+        )
+        assertEquals(
+            PathType.BLUETOOTH,
+            NetworkMonitor.classifyTransport(false, false, false, true),
+        )
+        assertEquals(
+            PathType.OTHER,
+            NetworkMonitor.classifyTransport(false, false, false, false),
+        )
     }
 
     @Test
-    fun validatedPhysicalNetworksAreUsablePaths() {
-        assertTrue(NetworkMonitor.isUsablePath(flags(hasWifi = true)))
-        assertTrue(NetworkMonitor.isUsablePath(flags(hasCellular = true)))
-        assertTrue(NetworkMonitor.isUsablePath(flags(hasEthernet = true)))
+    fun wifiAndCellularRemainHeldAndBluetoothCanBeHeldAlongsideEthernet() {
+        assertEquals(
+            listOf(
+                NetworkCapabilities.TRANSPORT_WIFI,
+                NetworkCapabilities.TRANSPORT_CELLULAR,
+                NetworkCapabilities.TRANSPORT_ETHERNET,
+            ),
+            NetworkMonitor.holdTransports(holdBluetooth = false),
+        )
+        assertEquals(
+            listOf(
+                NetworkCapabilities.TRANSPORT_WIFI,
+                NetworkCapabilities.TRANSPORT_CELLULAR,
+                NetworkCapabilities.TRANSPORT_ETHERNET,
+                NetworkCapabilities.TRANSPORT_BLUETOOTH,
+            ),
+            NetworkMonitor.holdTransports(holdBluetooth = true),
+        )
     }
-
-    @Test
-    fun validatedOtherTransportIsNotUsedAsMqvpnPath() {
-        val otherTransport = flags()
-
-        assertFalse(NetworkMonitor.isUsablePath(otherTransport))
-    }
-
-    @Test
-    fun transportClassificationPrefersPhysicalPathTypes() {
-        assertEquals(PathType.WIFI, NetworkMonitor.classifyTransport(flags(hasWifi = true)))
-        assertEquals(PathType.CELLULAR, NetworkMonitor.classifyTransport(flags(hasCellular = true)))
-        assertEquals(PathType.ETHERNET, NetworkMonitor.classifyTransport(flags(hasEthernet = true)))
-    }
-
-    @Test
-    fun underlyingNetworkPreferenceUsesCostBeforeTransportType() {
-        val unmeteredCellular = NetworkMonitor.preferenceRank(PathType.CELLULAR, isMetered = false)
-        val meteredWifi = NetworkMonitor.preferenceRank(PathType.WIFI, isMetered = true)
-
-        assertTrue(unmeteredCellular < meteredWifi)
-    }
-
-    @Test
-    fun equallyMeteredPathsPreferWifiBeforeCellular() {
-        val wifi = NetworkMonitor.preferenceRank(PathType.WIFI, isMetered = false)
-        val cellular = NetworkMonitor.preferenceRank(PathType.CELLULAR, isMetered = false)
-
-        assertTrue(wifi < cellular)
-    }
-
-    private fun flags(
-        hasInternet: Boolean = true,
-        hasValidated: Boolean = true,
-        hasNotVpn: Boolean = true,
-        hasWifi: Boolean = false,
-        hasCellular: Boolean = false,
-        hasEthernet: Boolean = false,
-        hasNotMetered: Boolean = true,
-    ) = NetworkCapabilityFlags(
-        hasInternet = hasInternet,
-        hasValidated = hasValidated,
-        hasNotVpn = hasNotVpn,
-        hasWifi = hasWifi,
-        hasCellular = hasCellular,
-        hasEthernet = hasEthernet,
-        hasNotMetered = hasNotMetered,
-    )
 }

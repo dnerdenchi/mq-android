@@ -13,4 +13,12 @@ data class PathInfo(
     val bytesTx: Long,
     val bytesRx: Long,
     val srttMs: Long,
-)
+) {
+    companion object {
+        const val STATUS_PENDING = 0
+        const val STATUS_ACTIVE = 1
+        const val STATUS_DEGRADED = 2
+        const val STATUS_STANDBY = 3
+        const val STATUS_CLOSED = 4
+    }
+}

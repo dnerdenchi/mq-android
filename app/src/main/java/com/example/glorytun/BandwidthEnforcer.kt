@@ -34,13 +34,15 @@ class BandwidthEnforcer(
             BandwidthSettings.from(settingsPrefs),
             usage,
         )
-        val rates = paths.associate { path ->
-            path.handle to if (isCellularInterface(path.iface)) {
-                decision.sim.rateBytesPerSecond
-            } else {
-                decision.wifi.rateBytesPerSecond
+        val rates = paths.asSequence()
+            .filter { it.status != PathInfo.STATUS_CLOSED }
+            .associate { path ->
+                path.handle to if (isCellularInterface(path.iface)) {
+                    decision.sim.rateBytesPerSecond
+                } else {
+                    decision.wifi.rateBytesPerSecond
+                }
             }
-        }
         if (rates != lastRates) {
             applyPathRates(rates)
             lastRates = rates

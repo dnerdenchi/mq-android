@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 package com.mqvpn.sdk.core
 
 internal class TunPacketFlowController(
@@ -15,15 +18,12 @@ internal class TunPacketFlowController(
         try {
             while (nextFrame < frames.size) {
                 awaitWritable()
-
                 val (frame, length) = frames[nextFrame]
                 val result = sendPacket(frame, length)
                 if (result == MqvpnTunnel.ERR_AGAIN) {
-                    // The native queue did not accept this frame; retain it for retry.
                     backpressured = true
                     continue
                 }
-
                 releaseFrame(frame)
                 nextFrame++
             }

@@ -62,6 +62,7 @@ object MqvpnConfigFactory {
             reorderPorts = listOf(443),
             hybridEnabled = true,
             hybridTcpMode = MqvpnConfig.HybridTcpMode.AUTO,
+            bluetoothPathEnabled = true,
         )
     }
 

@@ -8,87 +8,40 @@ import org.junit.Test
 
 class PathTrafficAccumulatorTest {
     @Test
-    fun pathReconnectKeepsCumulativeTotalsAndResumesFromNewPathBaseline() {
-        val accumulator = PathTrafficAccumulator()
+    fun activeBluetoothUsbAndEthernetPathsSetTheirOwnAvailabilityFlags() {
+        val update = PathTrafficAccumulator().update(
+            listOf(
+                path(1, PathInfo.STATUS_ACTIVE, "wifi-1"),
+                path(2, PathInfo.STATUS_PENDING, "bluetooth-2"),
+                path(3, PathInfo.STATUS_STANDBY, "ethernet-3"),
+                path(4, PathInfo.STATUS_CLOSED, "cellular-4"),
+            ),
+        )
 
-        accumulator.update(listOf(path(handle = 1L, iface = "wifi-10", rx = 1_000L)))
-        val beforeReconnect = accumulator.update(listOf(path(handle = 1L, iface = "wifi-10", rx = 5_000L)))
-
-        assertEquals(4_000L, beforeReconnect.totals.wifiTotal)
-        assertEquals(4_000f / 1024f, beforeReconnect.wifiDeltaKB, 0.001f)
-        assertTrue(beforeReconnect.totals.wifiActive)
-
-        val lostPath = accumulator.update(emptyList())
-
-        assertEquals(4_000L, lostPath.totals.wifiTotal)
-        assertEquals(0f, lostPath.wifiDeltaKB, 0.001f)
-        assertFalse(lostPath.totals.wifiActive)
-
-        val newPathBaseline = accumulator.update(listOf(path(handle = 2L, iface = "wifi-22", rx = 1_000L)))
-
-        assertEquals(4_000L, newPathBaseline.totals.wifiTotal)
-        assertEquals(0f, newPathBaseline.wifiDeltaKB, 0.001f)
-        assertTrue(newPathBaseline.totals.wifiActive)
-
-        val afterReconnect = accumulator.update(listOf(path(handle = 2L, iface = "wifi-22", rx = 2_500L)))
-
-        assertEquals(5_500L, afterReconnect.totals.wifiTotal)
-        assertEquals(1_500f / 1024f, afterReconnect.wifiDeltaKB, 0.001f)
+        assertTrue(update.totals.wifiPathActive)
+        assertTrue(update.totals.bluetoothActive)
+        assertTrue(update.totals.ethernetActive)
+        assertFalse(update.totals.simActive)
     }
 
     @Test
-    fun wifiAndCellularDeltasStaySeparated() {
+    fun closedPathIsHiddenAfterItsFinalCountersAreAccounted() {
         val accumulator = PathTrafficAccumulator()
-
-        accumulator.update(
-            listOf(
-                path(handle = 1L, iface = "wifi-10", tx = 100L, rx = 200L),
-                path(handle = 2L, iface = "cellular-11", tx = 300L, rx = 400L)
-            )
-        )
+        accumulator.update(listOf(path(5, PathInfo.STATUS_ACTIVE, "wifi-5", bytesTx = 100)))
 
         val update = accumulator.update(
-            listOf(
-                path(handle = 1L, iface = "wifi-10", tx = 600L, rx = 1_200L),
-                path(handle = 2L, iface = "cellular-11", tx = 1_300L, rx = 2_400L)
-            )
+            listOf(path(5, PathInfo.STATUS_CLOSED, "wifi-5", bytesTx = 140)),
         )
 
-        assertEquals(500L, update.totals.wifiTx)
-        assertEquals(1_000L, update.totals.wifiRx)
-        assertEquals(1_000L, update.totals.simTx)
-        assertEquals(2_000L, update.totals.simRx)
-        assertEquals(1_500f / 1024f, update.wifiDeltaKB, 0.001f)
-        assertEquals(3_000f / 1024f, update.simDeltaKB, 0.001f)
-    }
-
-    @Test
-    fun resetClearsBaselinesAndCumulativeTotals() {
-        val accumulator = PathTrafficAccumulator()
-
-        accumulator.update(listOf(path(handle = 1L, iface = "wifi-10", rx = 1_000L)))
-        accumulator.update(listOf(path(handle = 1L, iface = "wifi-10", rx = 5_000L)))
-        accumulator.reset()
-
-        val update = accumulator.update(listOf(path(handle = 1L, iface = "wifi-10", rx = 9_000L)))
-
-        assertEquals(0L, update.totals.wifiTotal)
-        assertEquals(0f, update.wifiDeltaKB, 0.001f)
+        assertFalse(update.totals.wifiPathActive)
+        assertEquals(40L, update.totals.wifiTx)
     }
 
     private fun path(
         handle: Long,
+        status: Int,
         iface: String,
-        tx: Long = 0L,
-        rx: Long = 0L
-    ): PathInfo {
-        return PathInfo(
-            handle = handle,
-            status = 0,
-            iface = iface,
-            bytesTx = tx,
-            bytesRx = rx,
-            srttMs = 0L
-        )
-    }
+        bytesTx: Long = 0,
+        bytesRx: Long = 0,
+    ) = PathInfo(handle, status, iface, bytesTx, bytesRx, srttMs = 0)
 }

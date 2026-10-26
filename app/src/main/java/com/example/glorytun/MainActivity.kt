@@ -95,6 +95,18 @@ class MainActivity : AppCompatActivity() {
                 pairSharePeerNames = intent.getStringArrayListExtra("pair_share_peer_names")
                     ?: emptyList(),
             )
+            viewModel.updatePathSpeeds(
+                PathSpeedSnapshot(
+                    wifiActive = intent.getBooleanExtra("wifi_path_active", false),
+                    simActive = intent.getBooleanExtra("sim_active", false),
+                    bluetoothActive = intent.getBooleanExtra("bluetooth_active", false),
+                    ethernetActive = intent.getBooleanExtra("ethernet_active", false),
+                    wifiBps = intent.getLongExtra("wifi_bps", 0L),
+                    simBps = intent.getLongExtra("sim_bps", 0L),
+                    bluetoothBps = intent.getLongExtra("bluetooth_bps", 0L),
+                    ethernetBps = intent.getLongExtra("ethernet_bps", 0L),
+                ),
+            )
             val dailyWifi = intent.getDoubleExtra("daily_wifi_kb", -1.0)
             if (dailyWifi >= 0.0) {
                 viewModel.updateDailyTraffic(

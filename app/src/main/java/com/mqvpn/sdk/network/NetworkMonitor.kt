@@ -5,6 +5,7 @@ package com.mqvpn.sdk.network
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
@@ -12,31 +13,39 @@ import android.util.Log
 import androidx.core.content.getSystemService
 import java.util.concurrent.ConcurrentHashMap
 
-internal data class NetworkCapabilityFlags(
-    val hasInternet: Boolean,
-    val hasValidated: Boolean,
-    val hasNotVpn: Boolean,
-    val hasWifi: Boolean,
-    val hasCellular: Boolean,
-    val hasEthernet: Boolean,
-    val hasNotMetered: Boolean,
-)
-
 /**
- * Monitors WiFi / Cellular / Ethernet availability via ConnectivityManager.
+ * Monitors WiFi / Cellular / Ethernet / Bluetooth availability via
+ * ConnectivityManager.
  *
  * Uses NET_CAPABILITY_VALIDATED to filter out captive portals and
  * unvalidated networks that would cause packet loss if used as VPN paths.
+ *
+ * Android keeps a network connected only while a request is served by it,
+ * and the default request is served by one network at a time. The monitor
+ * therefore holds one request per transport while it runs: without them an
+ * Ethernet adapter takes Wi-Fi down, and a Bluetooth tether never comes up
+ * next to Wi-Fi. The holds only keep networks connected; paths still come
+ * from the listening callback.
+ *
+ * @param holdBluetooth Also hold a Bluetooth-tethered network. When false it
+ *   is still used as a path whenever Android connects it on its own.
  */
-class NetworkMonitor(private val context: Context) {
+class NetworkMonitor(
+    private val context: Context,
+    private val holdBluetooth: Boolean = false,
+) {
 
     private val cm = context.getSystemService<ConnectivityManager>()!!
 
     private val _activeNetworks = ConcurrentHashMap<Network, NetworkPath>()
     val activeNetworks: Map<Network, NetworkPath> get() = _activeNetworks
 
+    // Every network the listener matches, active or not: a network dropped
+    // with removeNetwork() is announced again from here.
+    private val knownNetworks = ConcurrentHashMap<Network, NetworkPath>()
+
     private var callback: ConnectivityManager.NetworkCallback? = null
-    private var cellularRequestCallback: ConnectivityManager.NetworkCallback? = null
+    private val holds = mutableListOf<ConnectivityManager.NetworkCallback>()
 
     fun start(listener: (NetworkEvent) -> Unit) {
         val request = NetworkRequest.Builder()
@@ -47,150 +56,112 @@ class NetworkMonitor(private val context: Context) {
 
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                handleCapabilities(network, cm.getNetworkCapabilities(network), listener)
+                /* capabilities may not be available yet; wait for onCapabilitiesChanged */
             }
 
             override fun onCapabilitiesChanged(
                 network: Network,
                 capabilities: NetworkCapabilities,
             ) {
-                handleCapabilities(network, capabilities, listener)
+                val type = classifyTransport(capabilities)
+                if (type == PathType.OTHER) return
+                val name = networkName(network, type)
+                val metered = !capabilities.hasCapability(
+                    NetworkCapabilities.NET_CAPABILITY_NOT_METERED,
+                )
+                val path = NetworkPath(network, type, name, metered)
+                knownNetworks[network] = path
+                announce(path)
+            }
+
+            // A dual-stack network can validate over IPv6 before DHCPv4
+            // finishes; an IPv4-only server name resolves only once the IPv4
+            // address arrives, and that changes the link properties, not the
+            // capabilities. A path whose bind failed is retried from here too.
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                knownNetworks[network]?.let { announce(it) }
             }
 
             override fun onLost(network: Network) {
+                knownNetworks.remove(network)
                 val path = _activeNetworks.remove(network) ?: return
                 Log.d(TAG, "Lost: $path")
                 listener(NetworkEvent.Lost(path))
             }
+
+            private fun announce(path: NetworkPath) {
+                val isNew = _activeNetworks.put(path.network, path) == null
+                if (isNew) {
+                    Log.d(TAG, "Available: $path")
+                    listener(NetworkEvent.Available(path))
+                }
+            }
         }
 
-        callback = cb
+        // Each callback is recorded only once registered: when a registration
+        // throws, stop() releases exactly the ones that went through.
         cm.registerNetworkCallback(request, cb)
-        cm.allNetworks.forEach { network ->
-            handleCapabilities(network, cm.getNetworkCapabilities(network), listener)
+        callback = cb
+
+        for (transport in holdTransports(holdBluetooth)) {
+            val hold = ConnectivityManager.NetworkCallback()
+            cm.requestNetwork(
+                NetworkRequest.Builder()
+                    .addTransportType(transport)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build(),
+                hold,
+            )
+            holds += hold
         }
-        keepCellularNetworkAvailable()
     }
 
-    /** Remove a network so the next onCapabilitiesChanged treats it as new. */
+    /** Remove a network so the next capability or link-property update treats it as new. */
     fun removeNetwork(network: Network) {
         _activeNetworks.remove(network)
     }
 
     fun stop() {
         callback?.let { cm.unregisterNetworkCallback(it) }
-        cellularRequestCallback?.let { requestCallback ->
-            runCatching { cm.unregisterNetworkCallback(requestCallback) }
-                .onFailure { Log.w(TAG, "Failed to release cellular network request", it) }
-        }
         callback = null
-        cellularRequestCallback = null
+        holds.forEach { cm.unregisterNetworkCallback(it) }
+        holds.clear()
         _activeNetworks.clear()
-    }
-
-    /** Networks currently used by mqvpn, ordered from least to most costly. */
-    fun preferredNetworks(): Array<Network> = _activeNetworks.values
-        .sortedWith(
-            compareBy<NetworkPath> { preferenceRank(it.type, it.isMetered) }
-                .thenBy { it.name }
-        )
-        .map { it.network }
-        .toTypedArray()
-
-    /**
-     * A passive callback does not keep a secondary cellular network up while
-     * Wi-Fi is the default. Hold one cellular request for the tunnel lifetime
-     * so multipath failover does not wait for the modem to reconnect.
-     */
-    private fun keepCellularNetworkAvailable() {
-        val request = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-            .build()
-        val requestCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                Log.d(TAG, "Cellular standby network available: $network")
-            }
-
-            override fun onUnavailable() {
-                Log.i(TAG, "Cellular standby network unavailable")
-            }
-        }
-
-        runCatching { cm.requestNetwork(request, requestCallback) }
-            .onSuccess { cellularRequestCallback = requestCallback }
-            .onFailure { Log.w(TAG, "Unable to keep cellular standby network", it) }
-    }
-
-    private fun handleCapabilities(
-        network: Network,
-        capabilities: NetworkCapabilities?,
-        listener: (NetworkEvent) -> Unit,
-    ) {
-        val flags = capabilities?.toFlags()
-        if (flags == null || !isUsablePath(flags)) {
-            val removed = _activeNetworks.remove(network)
-            if (removed != null) {
-                Log.d(TAG, "Lost unusable path: $removed")
-                listener(NetworkEvent.Lost(removed))
-            }
-            return
-        }
-
-        val type = classifyTransport(flags)
-        val path = NetworkPath(
-            network = network,
-            type = type,
-            name = networkName(network, type),
-            isMetered = !flags.hasNotMetered,
-        )
-        val isNew = _activeNetworks.put(network, path) == null
-        if (isNew) {
-            Log.d(TAG, "Available: $path")
-            listener(NetworkEvent.Available(path))
-        }
+        knownNetworks.clear()
     }
 
     companion object {
         private const val TAG = "NetworkMonitor"
 
-        internal fun isUsablePath(flags: NetworkCapabilityFlags): Boolean {
-            return flags.hasInternet &&
-                flags.hasValidated &&
-                flags.hasNotVpn &&
-                (flags.hasWifi || flags.hasCellular || flags.hasEthernet)
+        internal fun classifyTransport(caps: NetworkCapabilities): PathType = classifyTransport(
+            hasWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+            hasCellular = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
+            hasEthernet = caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
+            hasBluetooth = caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH),
+        )
+
+        internal fun classifyTransport(
+            hasWifi: Boolean,
+            hasCellular: Boolean,
+            hasEthernet: Boolean,
+            hasBluetooth: Boolean,
+        ): PathType = when {
+            hasWifi -> PathType.WIFI
+            hasCellular -> PathType.CELLULAR
+            hasEthernet -> PathType.ETHERNET
+            hasBluetooth -> PathType.BLUETOOTH
+            else -> PathType.OTHER
         }
 
-        internal fun classifyTransport(flags: NetworkCapabilityFlags): PathType = when {
-            flags.hasWifi -> PathType.WIFI
-            flags.hasCellular -> PathType.CELLULAR
-            flags.hasEthernet -> PathType.ETHERNET
-            else -> PathType.OTHER
+        /** Transports whose network is held while the monitor runs. */
+        internal fun holdTransports(holdBluetooth: Boolean): List<Int> = buildList {
+            add(NetworkCapabilities.TRANSPORT_WIFI)
+            add(NetworkCapabilities.TRANSPORT_CELLULAR)
+            add(NetworkCapabilities.TRANSPORT_ETHERNET)
+            if (holdBluetooth) add(NetworkCapabilities.TRANSPORT_BLUETOOTH)
         }
 
         internal fun networkName(network: Network, type: PathType): String =
             "${type.name.lowercase()}-${network.networkHandle and 0xFFF}"
-
-        internal fun preferenceRank(type: PathType, isMetered: Boolean): Int {
-            val meteredRank = if (isMetered) 10 else 0
-            val transportRank = when (type) {
-                PathType.WIFI -> 0
-                PathType.ETHERNET -> 1
-                PathType.CELLULAR -> 2
-                PathType.OTHER -> 3
-            }
-            return meteredRank + transportRank
-        }
-
-        private fun NetworkCapabilities.toFlags() = NetworkCapabilityFlags(
-            hasInternet = hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),
-            hasValidated = hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
-            hasNotVpn = hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN),
-            hasWifi = hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
-            hasCellular = hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR),
-            hasEthernet = hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET),
-            hasNotMetered = hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
-        )
     }
 }
