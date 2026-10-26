@@ -138,20 +138,24 @@
 
         <!-- スピードメトリクスカード -->
         <LinearLayout
+            android:id="@+id/speed_cards_row"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:layout_marginBottom="16dp">
+            android:layout_marginBottom="8dp"
+            android:visibility="gone">
 
             <!-- Wi-Fi スピード -->
             <LinearLayout
+                android:id="@+id/wifi_speed_card"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:orientation="vertical"
                 android:background="@drawable/bg_card"
                 android:padding="12dp"
-                android:layout_marginEnd="4dp">
+                android:layout_marginEnd="4dp"
+                android:visibility="gone">
 
                 <!-- Wi-Fi ラベル行（ラベル左 + 制限アイコン右） -->
                 <LinearLayout
@@ -209,6 +213,7 @@
 
             <!-- SIM スピード -->
             <LinearLayout
+                android:id="@+id/sim_speed_card"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
@@ -216,7 +221,8 @@
                 android:background="@drawable/bg_card"
                 android:padding="12dp"
                 android:layout_marginStart="4dp"
-                android:layout_marginEnd="4dp">
+                android:layout_marginEnd="4dp"
+                android:visibility="gone">
 
                 <!-- SIM ラベル行（ラベル左 + 制限アイコン右） -->
                 <LinearLayout
@@ -274,13 +280,15 @@
 
             <!-- Pair & Share: 受信側から見た共有経路の速度 -->
             <LinearLayout
+                android:id="@+id/pair_share_speed_card"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginStart="4dp"
                 android:background="@drawable/bg_card"
                 android:orientation="vertical"
-                android:padding="12dp">
+                android:padding="12dp"
+                android:visibility="gone">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -325,6 +333,82 @@
                     android:text="未使用"
                     android:textColor="@color/on_surface_variant"
                     android:textSize="11sp" />
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/additional_speed_cards_row"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/bluetooth_speed_card"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:padding="12dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:text="Bluetooth"
+                    android:textColor="@color/primary"
+                    android:textSize="11sp" />
+
+                <TextView
+                    android:id="@+id/tv_bluetooth_speed"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:autoSizeMaxTextSize="18sp"
+                    android:autoSizeMinTextSize="12sp"
+                    android:autoSizeStepGranularity="1sp"
+                    android:autoSizeTextType="uniform"
+                    android:singleLine="true"
+                    android:text="-- kbps"
+                    android:textColor="@color/on_surface"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/ethernet_speed_card"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:padding="12dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="8dp"
+                    android:text="USB / イーサネット"
+                    android:textColor="@color/tertiary"
+                    android:textSize="11sp" />
+
+                <TextView
+                    android:id="@+id/tv_ethernet_speed"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:autoSizeMaxTextSize="18sp"
+                    android:autoSizeMinTextSize="12sp"
+                    android:autoSizeStepGranularity="1sp"
+                    android:autoSizeTextType="uniform"
+                    android:singleLine="true"
+                    android:text="-- kbps"
+                    android:textColor="@color/on_surface"
+                    android:textStyle="bold" />
             </LinearLayout>
 
         </LinearLayout>

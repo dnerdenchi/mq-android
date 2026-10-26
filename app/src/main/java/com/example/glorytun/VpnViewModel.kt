@@ -7,6 +7,17 @@ import java.util.Calendar
 
 data class TrafficPoint(val timestamp: Long, val wifiKBs: Float, val simKBs: Float)
 
+data class PathSpeedSnapshot(
+    val wifiActive: Boolean = false,
+    val simActive: Boolean = false,
+    val bluetoothActive: Boolean = false,
+    val ethernetActive: Boolean = false,
+    val wifiBps: Long = 0L,
+    val simBps: Long = 0L,
+    val bluetoothBps: Long = 0L,
+    val ethernetBps: Long = 0L,
+)
+
 data class ServerCheckEntry(
     val checkedAt: Long,
     val reachable: Boolean,
@@ -31,6 +42,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     val simKBs = MutableLiveData(0f)
     val pairShareKBs = MutableLiveData(0f)
     val pairSharePeerNames = MutableLiveData<List<String>>(emptyList())
+    val pathSpeeds = MutableLiveData(PathSpeedSnapshot())
     val wifiTotalBytes = MutableLiveData(0L)
     val simTotalBytes = MutableLiveData(0L)
 
@@ -130,6 +142,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         simTotalBytes.value = rates.simTotalBytes
     }
 
+    fun updatePathSpeeds(snapshot: PathSpeedSnapshot) {
+        pathSpeeds.value = snapshot
+    }
+
     fun addRealtimePoint(wifi: Float, sim: Float, pairShare: Float = 0f) {
         if (realtimeWifiRates.size >= MAX_REALTIME_POINTS) realtimeWifiRates.removeFirst()
         if (realtimeSimRates.size >= MAX_REALTIME_POINTS) realtimeSimRates.removeFirst()
@@ -156,6 +172,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         simKBs.value = 0f
         pairShareKBs.value = 0f
         pairSharePeerNames.value = emptyList()
+        pathSpeeds.value = PathSpeedSnapshot()
         wifiTotalBytes.value = 0L
         simTotalBytes.value = 0L
         if (clearSessionHistory) {

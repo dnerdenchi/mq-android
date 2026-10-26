@@ -15,30 +15,19 @@ internal data class ReorderPlan(
     val warnings: List<String>,
 )
 
-internal fun planReorder(
-    config: MqvpnConfig,
-    maxRules: Int = MQVPN_REORDER_MAX_RULES,
-): ReorderPlan {
+internal fun planReorder(config: MqvpnConfig, maxRules: Int = MQVPN_REORDER_MAX_RULES): ReorderPlan {
     if (!config.reorderEnabled) return ReorderPlan(false, emptyList(), emptyList())
     val warnings = mutableListOf<String>()
-    val valid = config.reorderPorts.distinct().filter { port ->
-        (port in 1..65535).also {
-            if (!it) warnings += "reorder port out of range: $port (ignored)"
-        }
+    val valid = config.reorderPorts.distinct().filter { p ->
+        (p in 1..65535).also { if (!it) warnings += "reorder port out of range: $p (ignored)" }
     }
     val capped = if (valid.size > maxRules) {
         warnings += "reorder ports exceed $maxRules; dropping ${valid.size - maxRules}"
         valid.take(maxRules)
-    } else {
-        valid
-    }
+    } else valid
     if (capped.isEmpty()) {
         return ReorderPlan(enabled = true, rules = emptyList(), warnings)
     }
     val profile = config.reorderProfile.native
-    return ReorderPlan(
-        enabled = true,
-        rules = capped.map { ReorderRuleSpec(REORDER_PROTO_UDP, it, profile) },
-        warnings = warnings,
-    )
+    return ReorderPlan(true, capped.map { ReorderRuleSpec(REORDER_PROTO_UDP, it, profile) }, warnings)
 }

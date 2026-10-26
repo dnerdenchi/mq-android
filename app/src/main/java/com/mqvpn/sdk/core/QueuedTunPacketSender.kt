@@ -1,5 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 mp0rta and mqvpn contributors
+
 package com.mqvpn.sdk.core
 
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -9,11 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Bounded, ordered sender for packet producers that cannot call suspend APIs.
- * Producers block only when the bounded queue is full, propagating native
- * backpressure instead of silently dropping packets.
- */
+/** Bounded, ordered sender for custom TUN packet producers. */
 internal class QueuedTunPacketSender(
     private val sendPacket: suspend (ByteArray, Int) -> Int,
     private val isWritable: suspend () -> Boolean,
@@ -28,7 +28,6 @@ internal class QueuedTunPacketSender(
         isWritable = isWritable,
         waitForNextCheck = waitForNextCheck,
     )
-
     private var senderJob: Job? = null
 
     fun start(scope: CoroutineScope) {
@@ -43,11 +42,12 @@ internal class QueuedTunPacketSender(
                         val next = frames.tryReceive().getOrNull() ?: break
                         batch.add(next)
                     }
-
                     val pending = batch.toList()
                     batch.clear()
                     flowController.sendBatch(pending) {}
                 }
+            } catch (error: Exception) {
+                if (isActive) Log.w(TAG, "Custom TUN sender stopped: ${error.message}")
             } finally {
                 accepting.set(false)
                 frames.close()
@@ -58,12 +58,10 @@ internal class QueuedTunPacketSender(
     fun enqueue(packet: ByteArray, length: Int = packet.size): Boolean {
         require(length in 0..packet.size) { "Invalid packet length: $length" }
         if (!accepting.get()) return false
-
         val frame = packet.copyOf(length)
         val queued = frames.trySend(frame to frame.size)
         if (queued.isSuccess) return true
         if (queued.isClosed) return false
-
         onQueueSaturated()
         return runBlocking {
             runCatching {
@@ -81,6 +79,7 @@ internal class QueuedTunPacketSender(
     }
 
     companion object {
+        private const val TAG = "QueuedTunPacketSender"
         private const val DEFAULT_CAPACITY = 192
         private const val MAX_BATCH_SIZE = 64
     }

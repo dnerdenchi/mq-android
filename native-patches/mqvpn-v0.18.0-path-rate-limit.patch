@@ -1,0 +1,407 @@
+diff --git a/android/sdk-native/src/main/jni/mqvpn_jni.c b/android/sdk-native/src/main/jni/mqvpn_jni.c
+index 56b927e..2f4d053 100644
+--- a/android/sdk-native/src/main/jni/mqvpn_jni.c
++++ b/android/sdk-native/src/main/jni/mqvpn_jni.c
+@@ -1163,6 +1163,20 @@ JNI_FN(reactorAddPath)(JNIEnv *env, jobject thiz, jlong reactor, jlong client, j
+         (int)fd, name, ANDROID_UDP_GSO, ANDROID_UDP_GRO);
+ }
+ 
++/* reactorSetPathRateLimit(reactor, pathHandle, bytesPerSecond) -> int */
++JNIEXPORT jint JNICALL
++JNI_FN(reactorSetPathRateLimit)(JNIEnv *env, jobject thiz, jlong reactor,
++                                jlong pathHandle, jlong bytesPerSecond)
++{
++    (void)env;
++    (void)thiz;
++    if (bytesPerSecond < 0) return MQVPN_ERR_INVALID_ARG;
++    return mqvpn_android_reactor_set_path_rate_limit(
++        (mqvpn_android_reactor_t *)(intptr_t)reactor,
++        (mqvpn_path_handle_t)pathHandle,
++        (uint64_t)bytesPerSecond);
++}
++
+ /* reactorRemovePath(reactor, client, pathHandle) → int. Orderly removal:
+  * the library abandons the path and the reactor stops polling the fd; Kotlin
+  * then closes the fd (never on the bad-fd chain) and calls reactorPathReleased. */
+diff --git a/include/mqvpn_bind_posix.h b/include/mqvpn_bind_posix.h
+index ea0150f..e3fbbfd 100644
+--- a/include/mqvpn_bind_posix.h
++++ b/include/mqvpn_bind_posix.h
+@@ -92,6 +92,17 @@ MQVPN_API int mqvpn_bind_posix_path_gro_errno(const void *ctx);
+ MQVPN_API void mqvpn_bind_posix_path_get_stats(const void *ctx,
+                                                mqvpn_bind_posix_stats_t *out);
+ 
++/* Android app extension: set a per-path ceiling for both directions. A value
++ * of zero disables shaping. All calls run on the engine thread. */
++MQVPN_API int mqvpn_bind_posix_path_set_rate_limit(void *ctx,
++                                                   uint64_t bytes_per_second);
++MQVPN_API int mqvpn_bind_posix_path_rate_limited(const void *ctx);
++MQVPN_API int mqvpn_bind_posix_path_peek_rx_bytes(const void *ctx,
++                                                  uint64_t *bytes);
++MQVPN_API int mqvpn_bind_posix_path_rx_can_take(void *ctx, uint64_t bytes,
++                                                uint64_t *wait_us);
++MQVPN_API int mqvpn_bind_posix_path_rx_take(void *ctx, uint64_t bytes);
++
+ /* RX helpers — the platform calls one of these when its reactor (or reader
+  * thread) says the fd is readable. recv_one() performs ONE receive (possibly
+  * a GRO aggregate) and pushes every segment to mqvpn_client_on_socket_recv
+diff --git a/src/bind/posix.c b/src/bind/posix.c
+index 618f83d..50818ae 100644
+--- a/src/bind/posix.c
++++ b/src/bind/posix.c
+@@ -19,6 +19,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/socket.h>
++#include <time.h>
+ 
+ #ifdef MQVPN_OFFLOAD_TEST_SEAM
+ /* Allocation seam for the unit tests (NO_MEMORY constructor paths). */
+@@ -37,6 +38,13 @@ void *mqvpn_seam_calloc(size_t n, size_t sz);
+ 
+ /* ── shared ctx state ── */
+ 
++typedef struct {
++    uint64_t bytes_per_second;
++    uint64_t tokens;
++    uint64_t last_refill_us;
++    uint64_t refill_remainder;
++} rate_bucket_t;
++
+ typedef struct {
+     int fd; /* borrowed */
+     char tag[16];
+@@ -47,6 +55,8 @@ typedef struct {
+     uint64_t rx_receives;
+     uint64_t rx_datagrams;
+     int send_err_logged; /* one-shot guard for the single-datagram errno log */
++    rate_bucket_t tx_rate;
++    rate_bucket_t rx_rate;
+ } bind_common_t;
+ 
+ typedef struct {
+@@ -90,6 +100,132 @@ bind_label(const bind_common_t *c, char *buf, size_t buflen)
+     return buf;
+ }
+ 
++static uint64_t
++rate_now_us(void)
++{
++    struct timespec ts;
++    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
++    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
++}
++
++static uint64_t
++rate_burst(const rate_bucket_t *bucket, uint64_t packet_bytes)
++{
++    uint64_t burst = bucket->bytes_per_second / 10ULL;
++    if (burst < 4096ULL) burst = 4096ULL;
++    return packet_bytes > burst ? packet_bytes : burst;
++}
++
++static void
++rate_refill(rate_bucket_t *bucket, uint64_t packet_bytes)
++{
++    if (bucket->bytes_per_second == 0) return;
++
++    uint64_t now = rate_now_us();
++    uint64_t burst = rate_burst(bucket, packet_bytes);
++    if (bucket->last_refill_us == 0 || now < bucket->last_refill_us) {
++        bucket->tokens = burst;
++        bucket->last_refill_us = now;
++        return;
++    }
++
++    uint64_t elapsed = now - bucket->last_refill_us;
++    uint64_t added;
++    uint64_t remainder = bucket->refill_remainder;
++    if (elapsed > (UINT64_MAX - remainder) / bucket->bytes_per_second) {
++        added = burst;
++        remainder = 0;
++    } else {
++        uint64_t accrued = elapsed * bucket->bytes_per_second + remainder;
++        added = accrued / 1000000ULL;
++        remainder = accrued % 1000000ULL;
++    }
++    uint64_t tokens = bucket->tokens < burst ? bucket->tokens : burst;
++    uint64_t room = burst - tokens;
++    if (added >= room) {
++        bucket->tokens = burst;
++        bucket->refill_remainder = 0;
++    } else {
++        bucket->tokens = tokens + added;
++        bucket->refill_remainder = remainder;
++    }
++    bucket->last_refill_us = now;
++}
++
++static uint64_t
++rate_wait_us(uint64_t bytes, uint64_t rate, uint64_t remainder)
++{
++    if (rate == 0) return UINT64_MAX;
++    if (bytes > UINT64_MAX / 1000000ULL) return UINT64_MAX;
++    uint64_t numerator = bytes * 1000000ULL;
++    if (numerator > remainder) numerator -= remainder;
++    else return 0;
++    uint64_t wait = numerator / rate;
++    return numerator % rate == 0 || wait == UINT64_MAX ? wait : wait + 1;
++}
++
++static int
++rate_can_take(rate_bucket_t *bucket, uint64_t bytes, uint64_t *wait_us)
++{
++    if (wait_us) *wait_us = 0;
++    if (bucket->bytes_per_second == 0 || bytes == 0) return 1;
++
++    rate_refill(bucket, bytes);
++    if (bucket->tokens >= bytes) return 1;
++    if (wait_us)
++        *wait_us = rate_wait_us(bytes - bucket->tokens, bucket->bytes_per_second,
++                                bucket->refill_remainder);
++    return 0;
++}
++
++static int
++rate_take(rate_bucket_t *bucket, uint64_t bytes)
++{
++    if (!rate_can_take(bucket, bytes, NULL)) return 0;
++    if (bucket->bytes_per_second != 0) bucket->tokens -= bytes;
++    return 1;
++}
++
++static void
++rate_set(rate_bucket_t *bucket, uint64_t bytes_per_second)
++{
++    if (bucket->bytes_per_second == bytes_per_second) return;
++    bucket->bytes_per_second = bytes_per_second;
++    bucket->tokens = bytes_per_second == 0 ? 0 : rate_burst(bucket, 0);
++    bucket->last_refill_us = rate_now_us();
++    bucket->refill_remainder = 0;
++}
++
++static unsigned
++path_rate_allowed_prefix(rate_bucket_t *bucket, const mqvpn_datagram_t *bufs,
++                         unsigned count)
++{
++    if (bucket->bytes_per_second == 0 || count == 0) return count;
++
++    rate_refill(bucket, bufs[0].len);
++    uint64_t used = 0;
++    unsigned allowed = 0;
++    while (allowed < count) {
++        uint64_t packet_bytes = (uint64_t)bufs[allowed].len;
++        if (UINT64_MAX - used < packet_bytes || used + packet_bytes > bucket->tokens) break;
++        used += packet_bytes;
++        allowed++;
++    }
++    return allowed;
++}
++
++static uint64_t
++path_rate_prefix_bytes(const mqvpn_datagram_t *bufs, unsigned count)
++{
++    uint64_t bytes = 0;
++    for (unsigned i = 0; i < count; i++) {
++        uint64_t packet_bytes = (uint64_t)bufs[i].len;
++        if (UINT64_MAX - bytes < packet_bytes) return UINT64_MAX;
++        bytes += packet_bytes;
++    }
++    return bytes;
++}
++
+ static void
+ bind_apply_sockbuf(int fd, int bytes, const char *label)
+ {
+@@ -360,7 +496,13 @@ path_ops_send(void *vctx, const mqvpn_datagram_t *bufs, unsigned n,
+ {
+     bind_path_ctx_t *ctx = (bind_path_ctx_t *)vctx;
+     if (!ctx) return MQVPN_TX_FAILED;
+-    return bind_send(&ctx->c, &ctx->gso_disabled, NULL, bufs, n, peer, peer_len);
++    unsigned allowed = path_rate_allowed_prefix(&ctx->c.tx_rate, bufs, n);
++    if (allowed == 0) return MQVPN_TX_WOULD_BLOCK;
++    int sent = bind_send(&ctx->c, &ctx->gso_disabled, NULL, bufs, allowed, peer, peer_len);
++    if (sent > 0 && ctx->c.tx_rate.bytes_per_second != 0) {
++        (void)rate_take(&ctx->c.tx_rate, path_rate_prefix_bytes(bufs, (unsigned)sent));
++    }
++    return sent;
+ }
+ 
+ static int
+@@ -445,6 +587,54 @@ mqvpn_bind_posix_path_get_stats(const void *ctx, mqvpn_bind_posix_stats_t *out)
+     bind_fill_stats(ctx ? &((const bind_path_ctx_t *)ctx)->c : NULL, out);
+ }
+ 
++int
++mqvpn_bind_posix_path_set_rate_limit(void *vctx, uint64_t bytes_per_second)
++{
++    bind_path_ctx_t *ctx = (bind_path_ctx_t *)vctx;
++    if (!ctx) return MQVPN_ERR_INVALID_ARG;
++    rate_set(&ctx->c.tx_rate, bytes_per_second);
++    rate_set(&ctx->c.rx_rate, bytes_per_second);
++    return MQVPN_OK;
++}
++
++int
++mqvpn_bind_posix_path_rate_limited(const void *vctx)
++{
++    const bind_path_ctx_t *ctx = (const bind_path_ctx_t *)vctx;
++    return ctx && ctx->c.rx_rate.bytes_per_second != 0;
++}
++
++int
++mqvpn_bind_posix_path_peek_rx_bytes(const void *vctx, uint64_t *bytes)
++{
++    const bind_path_ctx_t *ctx = (const bind_path_ctx_t *)vctx;
++    if (!ctx || !bytes) return MQVPN_ERR_INVALID_ARG;
++    ssize_t n;
++    do {
++        n = recv(ctx->c.fd, NULL, 0, MSG_DONTWAIT | MSG_PEEK | MSG_TRUNC);
++    } while (n < 0 && errno == EINTR);
++    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
++    if (n < 0) return -1;
++    *bytes = (uint64_t)n;
++    return 1;
++}
++
++int
++mqvpn_bind_posix_path_rx_can_take(void *vctx, uint64_t bytes, uint64_t *wait_us)
++{
++    bind_path_ctx_t *ctx = (bind_path_ctx_t *)vctx;
++    if (!ctx) return 0;
++    return rate_can_take(&ctx->c.rx_rate, bytes, wait_us);
++}
++
++int
++mqvpn_bind_posix_path_rx_take(void *vctx, uint64_t bytes)
++{
++    bind_path_ctx_t *ctx = (bind_path_ctx_t *)vctx;
++    if (!ctx) return 0;
++    return rate_take(&ctx->c.rx_rate, bytes);
++}
++
+ int
+ mqvpn_bind_posix_path_recv_one(void *vctx, mqvpn_client_t *client,
+                                mqvpn_path_handle_t handle)
+diff --git a/src/platform/android/reactor.c b/src/platform/android/reactor.c
+index 26bf0c5..5d95217 100644
+--- a/src/platform/android/reactor.c
++++ b/src/platform/android/reactor.c
+@@ -11,6 +11,7 @@
+ #include <assert.h>
+ #include <errno.h>
+ #include <inttypes.h>
++#include <limits.h>
+ #include <poll.h>
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -123,6 +124,14 @@ consume_wake(mqvpn_android_reactor_t *r)
+     (void)n;
+ }
+ 
++static int
++rate_wait_millis(uint64_t wait_us)
++{
++    uint64_t wait_ms = wait_us / 1000ULL + (wait_us % 1000ULL != 0);
++    if (wait_ms == 0) wait_ms = 1;
++    return wait_ms > INT_MAX ? INT_MAX : (int)wait_ms;
++}
++
+ int
+ mqvpn_android_reactor_wait(mqvpn_android_reactor_t *r, mqvpn_client_t *client,
+                            int timeout_ms)
+@@ -130,8 +139,21 @@ mqvpn_android_reactor_wait(mqvpn_android_reactor_t *r, mqvpn_client_t *client,
+     struct pollfd pfd[MQVPN_MAX_PATHS + 1];
+     int slot[MQVPN_MAX_PATHS];
+     int n = 0;
++    int rate_wait_ms = -1;
+     for (int i = 0; i < MQVPN_MAX_PATHS; i++) {
+         if (r->e[i].state != MQVPN_REACTOR_ENTRY_ATTACHED) continue;
++        if (mqvpn_bind_posix_path_rate_limited(r->e[i].ctx)) {
++            uint64_t bytes = 0;
++            int pending = mqvpn_bind_posix_path_peek_rx_bytes(r->e[i].ctx, &bytes);
++            if (pending > 0 && bytes > 0) {
++                uint64_t wait_us = 0;
++                if (!mqvpn_bind_posix_path_rx_can_take(r->e[i].ctx, bytes, &wait_us)) {
++                    int wait_ms = rate_wait_millis(wait_us);
++                    if (rate_wait_ms < 0 || wait_ms < rate_wait_ms) rate_wait_ms = wait_ms;
++                    continue; /* leave the datagram in the socket buffer */
++                }
++            }
++        }
+         pfd[n].fd = r->e[i].fd;
+         pfd[n].events = POLLIN;
+         pfd[n].revents = 0;
+@@ -144,7 +166,11 @@ mqvpn_android_reactor_wait(mqvpn_android_reactor_t *r, mqvpn_client_t *client,
+     pfd[n].events = POLLIN;
+     pfd[n].revents = 0;
+ 
+-    int rc = poll(pfd, (nfds_t)(n + 1), timeout_ms);
++    int wait_timeout_ms = timeout_ms;
++    if (rate_wait_ms >= 0 &&
++        (wait_timeout_ms < 0 || wait_timeout_ms == 0 || rate_wait_ms < wait_timeout_ms))
++        wait_timeout_ms = rate_wait_ms;
++    int rc = poll(pfd, (nfds_t)(n + 1), wait_timeout_ms);
+     if (rc < 0) {
+         if (errno == EINTR) return 0;
+         if (!r->poll_err_logged) {
+@@ -173,8 +199,23 @@ mqvpn_android_reactor_wait(mqvpn_android_reactor_t *r, mqvpn_client_t *client,
+             /* A pending socket error is consumed only by a receive; draining
+              * on POLLIN alone would spin. Hard errors are ignored, as on
+              * Linux: the network monitor owns drop detection. */
+-            (void)mqvpn_bind_posix_path_drain(e->ctx, client, e->handle,
+-                                              REACTOR_DRAIN_BUDGET);
++            int budget = REACTOR_DRAIN_BUDGET;
++            uint64_t bytes = 0;
++            int rate_limited = mqvpn_bind_posix_path_rate_limited(e->ctx);
++            int pending = rate_limited
++                              ? mqvpn_bind_posix_path_peek_rx_bytes(e->ctx, &bytes)
++                              : 0;
++            if (rate_limited) {
++                budget = 1;
++                if (pending > 0 && bytes > 0) {
++                    uint64_t wait_us = 0;
++                    if (!mqvpn_bind_posix_path_rx_can_take(e->ctx, bytes, &wait_us))
++                        continue;
++                }
++            }
++            int drained = mqvpn_bind_posix_path_drain(e->ctx, client, e->handle, budget);
++            if (rate_limited && pending > 0 && bytes > 0 && drained > 0)
++                (void)mqvpn_bind_posix_path_rx_take(e->ctx, bytes);
+             drains++;
+         }
+     }
+@@ -277,6 +318,17 @@ mqvpn_android_reactor_add_path(mqvpn_android_reactor_t *r, mqvpn_client_t *clien
+     return h;
+ }
+ 
++int
++mqvpn_android_reactor_set_path_rate_limit(mqvpn_android_reactor_t *r,
++                                          mqvpn_path_handle_t handle,
++                                          uint64_t bytes_per_second)
++{
++    entry_t *e = find_entry(r, handle);
++    if (!e || e->state != MQVPN_REACTOR_ENTRY_ATTACHED)
++        return MQVPN_ERR_INVALID_ARG;
++    return mqvpn_bind_posix_path_set_rate_limit(e->ctx, bytes_per_second);
++}
++
+ int
+ mqvpn_android_reactor_remove_path(mqvpn_android_reactor_t *r, mqvpn_client_t *client,
+                                   mqvpn_path_handle_t handle)
+diff --git a/src/platform/android/reactor.h b/src/platform/android/reactor.h
+index ec77823..e9568f7 100644
+--- a/src/platform/android/reactor.h
++++ b/src/platform/android/reactor.h
+@@ -96,6 +96,11 @@ mqvpn_path_handle_t mqvpn_android_reactor_add_path(mqvpn_android_reactor_t *r,
+                                                    const char *iface, int gso_policy,
+                                                    int gro_policy);
+ 
++/* Set both-direction per-path rate limits through the path's bind context. */
++int mqvpn_android_reactor_set_path_rate_limit(mqvpn_android_reactor_t *r,
++                                              mqvpn_path_handle_t handle,
++                                              uint64_t bytes_per_second);
++
+ /* mqvpn_client_remove_path() for every entry that is not FREE or POISONED
+  * (ATTACHED, INVALID or already DETACHED — the library call is idempotent);
+  * the entry becomes DETACHED whatever the library returns, and the library's

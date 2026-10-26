@@ -23,6 +23,8 @@ class DashboardFragment : Fragment() {
     private lateinit var tvServerInfo: TextView
     private lateinit var tvWifiSpeed: TextView
     private lateinit var tvSimSpeed: TextView
+    private lateinit var tvBluetoothSpeed: TextView
+    private lateinit var tvEthernetSpeed: TextView
     private lateinit var tvWifiTotal: TextView
     private lateinit var tvSimTotal: TextView
     private lateinit var tvTotalData: TextView
@@ -30,6 +32,13 @@ class DashboardFragment : Fragment() {
     private lateinit var tvSimThrottledBadge: TextView
     private lateinit var tvPairShareSpeed: TextView
     private lateinit var tvPairShareStatus: TextView
+    private lateinit var wifiSpeedCard: View
+    private lateinit var simSpeedCard: View
+    private lateinit var bluetoothSpeedCard: View
+    private lateinit var ethernetSpeedCard: View
+    private lateinit var pairShareSpeedCard: View
+    private lateinit var speedCardsRow: View
+    private lateinit var additionalSpeedCardsRow: View
     private lateinit var btnConnect: Button
     private lateinit var trafficGraph: TrafficGraphView
     private var pairShareTrafficSnapshot = PairShareTrafficSnapshot()
@@ -57,6 +66,8 @@ class DashboardFragment : Fragment() {
         tvServerInfo = view.findViewById(R.id.tv_server_info)
         tvWifiSpeed = view.findViewById(R.id.tv_wifi_speed)
         tvSimSpeed = view.findViewById(R.id.tv_sim_speed)
+        tvBluetoothSpeed = view.findViewById(R.id.tv_bluetooth_speed)
+        tvEthernetSpeed = view.findViewById(R.id.tv_ethernet_speed)
         tvWifiTotal = view.findViewById(R.id.tv_wifi_total)
         tvSimTotal = view.findViewById(R.id.tv_sim_total)
         tvTotalData = view.findViewById(R.id.tv_total_data)
@@ -64,6 +75,13 @@ class DashboardFragment : Fragment() {
         tvSimThrottledBadge = view.findViewById(R.id.tv_sim_throttled_badge)
         tvPairShareSpeed = view.findViewById(R.id.tv_pair_share_speed)
         tvPairShareStatus = view.findViewById(R.id.tv_pair_share_status)
+        wifiSpeedCard = view.findViewById(R.id.wifi_speed_card)
+        simSpeedCard = view.findViewById(R.id.sim_speed_card)
+        bluetoothSpeedCard = view.findViewById(R.id.bluetooth_speed_card)
+        ethernetSpeedCard = view.findViewById(R.id.ethernet_speed_card)
+        pairShareSpeedCard = view.findViewById(R.id.pair_share_speed_card)
+        speedCardsRow = view.findViewById(R.id.speed_cards_row)
+        additionalSpeedCardsRow = view.findViewById(R.id.additional_speed_cards_row)
         btnConnect = view.findViewById(R.id.btn_connect)
         trafficGraph = view.findViewById(R.id.traffic_graph)
 
@@ -88,6 +106,7 @@ class DashboardFragment : Fragment() {
 
         viewModel.pairShareKBs.observe(viewLifecycleOwner) { renderPairShareTraffic(pairShareTrafficSnapshot) }
         viewModel.pairSharePeerNames.observe(viewLifecycleOwner) { renderPairShareTraffic(pairShareTrafficSnapshot) }
+        viewModel.pathSpeeds.observe(viewLifecycleOwner, ::renderPathSpeeds)
 
         viewModel.wifiDailyBytes.observe(viewLifecycleOwner) { bytes ->
             tvWifiTotal.text = "今日: ${viewModel.formatBytes(bytes)}"
@@ -210,7 +229,9 @@ class DashboardFragment : Fragment() {
 
     private fun renderPairShareTraffic(snapshot: PairShareTrafficSnapshot) {
         pairShareTrafficSnapshot = snapshot
-        val receivingPeers = viewModel.pairSharePeerNames.value.orEmpty().joinToString("・")
+        val receivingPeers = (viewModel.pairSharePeerNames.value.orEmpty() + snapshot.receivingPeerNames)
+            .distinct()
+            .joinToString("・")
         val displayedPairRate = viewModel.pairShareKBs.value ?: 0f
         tvPairShareSpeed.text = if (receivingPeers.isNotBlank()) {
             "$receivingPeers · ${viewModel.formatBps(displayedPairRate)}"
@@ -222,6 +243,38 @@ class DashboardFragment : Fragment() {
             snapshot.sharing -> "共有先で表示"
             else -> "未使用"
         }
+        val pairShareActive = snapshot.activeSessionCount > 0 || snapshot.sharing ||
+            snapshot.receiving || receivingPeers.isNotBlank()
+        pairShareSpeedCard.visibility = if (pairShareActive) View.VISIBLE else View.GONE
+        updateSpeedRows()
+    }
+
+    private fun renderPathSpeeds(speeds: PathSpeedSnapshot) {
+        wifiSpeedCard.visibility = if (speeds.wifiActive) View.VISIBLE else View.GONE
+        simSpeedCard.visibility = if (speeds.simActive) View.VISIBLE else View.GONE
+        bluetoothSpeedCard.visibility = if (speeds.bluetoothActive) View.VISIBLE else View.GONE
+        ethernetSpeedCard.visibility = if (speeds.ethernetActive) View.VISIBLE else View.GONE
+
+        tvWifiSpeed.text = formatPathSpeed(speeds.wifiBps)
+        tvSimSpeed.text = formatPathSpeed(speeds.simBps)
+        tvBluetoothSpeed.text = formatPathSpeed(speeds.bluetoothBps)
+        tvEthernetSpeed.text = formatPathSpeed(speeds.ethernetBps)
+        updateSpeedRows()
+    }
+
+    private fun formatPathSpeed(bitsPerSecond: Long): String =
+        if (bitsPerSecond > 0L) viewModel.formatBps(bitsPerSecond / 8192f) else "-- kbps"
+
+    private fun updateSpeedRows() {
+        speedCardsRow.visibility = if (
+            wifiSpeedCard.visibility == View.VISIBLE ||
+            simSpeedCard.visibility == View.VISIBLE ||
+            pairShareSpeedCard.visibility == View.VISIBLE
+        ) View.VISIBLE else View.GONE
+        additionalSpeedCardsRow.visibility = if (
+            bluetoothSpeedCard.visibility == View.VISIBLE ||
+            ethernetSpeedCard.visibility == View.VISIBLE
+        ) View.VISIBLE else View.GONE
     }
 
     private fun startVpnConnection() {
