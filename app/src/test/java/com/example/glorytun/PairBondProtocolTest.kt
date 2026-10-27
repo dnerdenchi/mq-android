@@ -74,11 +74,13 @@ class PairBondProtocolTest {
     }
 
     @Test
-    fun wifiLocalSimAndPairedSimAllParticipateInActiveScheduling() {
+    fun localTransportsAndPairedSimAllParticipateInActiveScheduling() {
         val scheduler = PairBondPathScheduler()
         val paths = listOf(
             PairBondLocalPath.WIFI_ID,
             PairBondLocalPath.CELLULAR_ID,
+            PairBondLocalPath.BLUETOOTH_ID,
+            PairBondLocalPath.ETHERNET_ID,
             "paired-sim-a",
         ).map { id ->
             PairBondPathSnapshot(
@@ -93,7 +95,7 @@ class PairBondProtocolTest {
         }
 
         val selected = buildSet {
-            repeat(12) { scheduler.select(paths)?.id?.let(::add) }
+            repeat(20) { scheduler.select(paths)?.id?.let(::add) }
         }
 
         assertTrue(selected.containsAll(paths.map { it.id }))

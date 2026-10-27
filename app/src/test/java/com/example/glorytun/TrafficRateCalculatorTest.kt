@@ -5,22 +5,18 @@ import org.junit.Test
 
 class TrafficRateCalculatorTest {
     @Test
-    fun displayRateHoldsTheLastBurstAcrossShortCounterGaps() {
-        val hold = TrafficRateDisplayHold(holdMillis = 5_000L)
-
-        assertEquals(128f, hold.update(128f, 1_000L), 0.001f)
-        assertEquals(128f, hold.update(0f, 4_000L), 0.001f)
-        assertEquals(0f, hold.update(0f, 6_001L), 0.001f)
+    fun zeroNativeSampleIsNotReplacedByCounterRate() {
+        assertEquals(0f, selectTrafficRate(counterKBs = 128f, measuredBps = 0L), 0.001f)
     }
 
     @Test
-    fun zeroNativeSampleFallsBackToCounterRate() {
-        assertEquals(128f, selectTrafficRate(counterKBs = 128f, measuredBps = 0L), 0.001f)
+    fun absentNativeSampleFallsBackToCounterRate() {
+        assertEquals(128f, selectTrafficRate(counterKBs = 128f, measuredBps = null), 0.001f)
     }
 
     @Test
-    fun largerAvailableSampleWins() {
-        assertEquals(256f, selectTrafficRate(counterKBs = 128f, measuredBps = 2_097_152L), 0.001f)
+    fun nativeSampleWinsEvenWhenCounterRateIsLarger() {
+        assertEquals(128f, selectTrafficRate(counterKBs = 256f, measuredBps = 1_048_576L), 0.001f)
     }
 
     @Test

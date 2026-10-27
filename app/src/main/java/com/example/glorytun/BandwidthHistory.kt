@@ -9,6 +9,8 @@ import com.mqvpn.sdk.core.model.PathInfo
 data class BandwidthSample(
     val totalBps: Long,
     val perPathBps: Map<String, Long>,
+    val elapsedNanos: Long = 0L,
+    val perPathDeltaBytes: Map<String, Long> = emptyMap(),
 )
 
 /** History plus stable per-interface palette slots, published together. */
@@ -40,22 +42,25 @@ class BandwidthHistory(private val maxSamples: Int = MAX_SAMPLES) {
             }
 
         val perPath = mutableMapOf<String, Long>()
+        val deltas = mutableMapOf<String, Long>()
+        val elapsedNanos = previousNanos?.let { nowNanos - it } ?: 0L
         for ((iface, bytes) in bytesByInterface) {
             slots.getOrPut(iface) { slots.size }
             val baseline = baselines[iface]
-            perPath[iface] =
-                if (previousNanos == null || baseline == null || bytes < baseline) {
-                    0L
-                } else {
-                    ((bytes - baseline) * 8.0 * NANOS_PER_SECOND /
-                        (nowNanos - previousNanos)).toLong()
-                }
+            val delta = if (previousNanos == null || baseline == null || bytes < baseline) {
+                0L
+            } else {
+                bytes - baseline
+            }
+            deltas[iface] = delta
+            perPath[iface] = if (elapsedNanos == 0L) 0L else
+                (delta * 8.0 * NANOS_PER_SECOND / elapsedNanos).toLong()
             baselines[iface] = bytes
         }
         baselines.keys.retainAll(bytesByInterface.keys)
         lastNanos = nowNanos
 
-        samples.addLast(BandwidthSample(perPath.values.sum(), perPath))
+        samples.addLast(BandwidthSample(perPath.values.sum(), perPath, elapsedNanos, deltas))
         while (samples.size > maxSamples) samples.removeFirst()
         return samples.toList()
     }

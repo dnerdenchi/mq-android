@@ -25,24 +25,20 @@ class BandwidthEnforcer(
         paths: List<PathInfo>,
         wifiDeltaKb: Float,
         simDeltaKb: Float,
+        totalDeltaBytes: Long? = null,
     ): BandwidthStatus {
+        val wifiBytes = (wifiDeltaKb * 1_024.0).roundToLong().coerceAtLeast(0L)
+        val simBytes = (simDeltaKb * 1_024.0).roundToLong().coerceAtLeast(0L)
         val usage = usageStore.add(
-            wifiBytes = (wifiDeltaKb * 1_024.0).roundToLong(),
-            simBytes = (simDeltaKb * 1_024.0).roundToLong(),
+            wifiBytes = wifiBytes,
+            simBytes = simBytes,
+            totalBytes = totalDeltaBytes ?: (wifiBytes + simBytes),
         )
         val decision = BandwidthPolicy.evaluate(
             BandwidthSettings.from(settingsPrefs),
             usage,
         )
-        val rates = paths.asSequence()
-            .filter { it.status != PathInfo.STATUS_CLOSED }
-            .associate { path ->
-                path.handle to if (isCellularInterface(path.iface)) {
-                    decision.sim.rateBytesPerSecond
-                } else {
-                    decision.wifi.rateBytesPerSecond
-                }
-            }
+        val rates = pathBandwidthLimits(paths, decision)
         if (rates != lastRates) {
             applyPathRates(rates)
             lastRates = rates
@@ -62,3 +58,14 @@ class BandwidthEnforcer(
         lastRates = null
     }
 }
+
+internal fun pathBandwidthLimits(paths: List<PathInfo>, decision: BandwidthDecision): Map<Long, Long> =
+    paths.asSequence()
+        .filter { it.status != PathInfo.STATUS_CLOSED }
+        .associate { path ->
+            path.handle to when {
+                isWifiInterface(path.iface) -> decision.wifi.rateBytesPerSecond
+                isCellularInterface(path.iface) -> decision.sim.rateBytesPerSecond
+                else -> 0L
+            }
+        }

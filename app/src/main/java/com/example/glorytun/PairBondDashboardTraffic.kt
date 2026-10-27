@@ -4,8 +4,16 @@ internal data class PairBondDashboardTrafficUpdate(
     val totals: NetworkTrafficTotals,
     val wifiDeltaKB: Float,
     val simDeltaKB: Float,
+    val wifiDeltaBytes: Long,
+    val simDeltaBytes: Long,
+    val bluetoothDeltaBytes: Long,
+    val ethernetDeltaBytes: Long,
+    val pairShareDeltaBytes: Long,
+    val sampleDurationNanos: Long,
     val wifiBps: Long,
     val simBps: Long,
+    val bluetoothBps: Long,
+    val ethernetBps: Long,
     val pairShareBps: Long,
     val receivingPeerNames: List<String>,
 )
@@ -30,6 +38,8 @@ internal class PairBondDashboardTrafficAccumulator {
         var wifiDeltaRx = 0L
         var simDeltaTx = 0L
         var simDeltaRx = 0L
+        var bluetoothDelta = 0L
+        var ethernetDelta = 0L
         var pairDelta = 0L
         val activeIds = mutableSetOf<String>()
         val receivingNames = linkedSetOf<String>()
@@ -49,9 +59,11 @@ internal class PairBondDashboardTrafficAccumulator {
                     simDeltaTx += deltaTx
                     simDeltaRx += deltaRx
                 }
+                PairBondLocalPath.BLUETOOTH_ID -> bluetoothDelta += deltaTx + deltaRx
+                PairBondLocalPath.ETHERNET_ID -> ethernetDelta += deltaTx + deltaRx
                 else -> {
                     pairDelta += deltaTx + deltaRx
-                    peerNames[path.peerId]?.let(receivingNames::add)
+                    if (path.pathReady) peerNames[path.peerId]?.let(receivingNames::add)
                 }
             }
             previousById[path.peerId] = current
@@ -64,7 +76,7 @@ internal class PairBondDashboardTrafficAccumulator {
         cumulativeSimRx += simDeltaRx
 
         val elapsedMillis = previousSampleMillis
-            ?.let { (nowMillis - it).coerceAtLeast(1L) }
+            ?.let { (nowMillis - it).takeIf { elapsed -> elapsed > 0L } }
         previousSampleMillis = nowMillis
 
         fun toBitsPerSecond(bytes: Long): Long = if (elapsedMillis == null) {
@@ -77,15 +89,25 @@ internal class PairBondDashboardTrafficAccumulator {
             totals = NetworkTrafficTotals(
                 wifiTx = cumulativeWifiTx,
                 wifiRx = cumulativeWifiRx,
-                wifiActive = stats.any { it.peerId == PairBondLocalPath.WIFI_ID },
+                wifiActive = stats.any { it.peerId == PairBondLocalPath.WIFI_ID && it.pathReady },
                 simTx = cumulativeSimTx,
                 simRx = cumulativeSimRx,
-                simActive = stats.any { it.peerId == PairBondLocalPath.CELLULAR_ID },
+                simActive = stats.any { it.peerId == PairBondLocalPath.CELLULAR_ID && it.pathReady },
+                bluetoothActive = stats.any { it.peerId == PairBondLocalPath.BLUETOOTH_ID && it.pathReady },
+                ethernetActive = stats.any { it.peerId == PairBondLocalPath.ETHERNET_ID && it.pathReady },
             ),
             wifiDeltaKB = (wifiDeltaTx + wifiDeltaRx) / 1024f,
             simDeltaKB = (simDeltaTx + simDeltaRx) / 1024f,
+            wifiDeltaBytes = wifiDeltaTx + wifiDeltaRx,
+            simDeltaBytes = simDeltaTx + simDeltaRx,
+            bluetoothDeltaBytes = bluetoothDelta,
+            ethernetDeltaBytes = ethernetDelta,
+            pairShareDeltaBytes = pairDelta,
+            sampleDurationNanos = (elapsedMillis ?: 0L) * 1_000_000L,
             wifiBps = toBitsPerSecond(wifiDeltaTx + wifiDeltaRx),
             simBps = toBitsPerSecond(simDeltaTx + simDeltaRx),
+            bluetoothBps = toBitsPerSecond(bluetoothDelta),
+            ethernetBps = toBitsPerSecond(ethernetDelta),
             pairShareBps = toBitsPerSecond(pairDelta),
             receivingPeerNames = receivingNames.toList(),
         )

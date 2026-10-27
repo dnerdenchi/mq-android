@@ -139,19 +139,27 @@ class PairShareFragment : Fragment() {
         listOf(
             PairBondLocalPath.WIFI_ID to PairBondLocalPath.WIFI_NAME,
             PairBondLocalPath.CELLULAR_ID to PairBondLocalPath.CELLULAR_NAME,
+            PairBondLocalPath.BLUETOOTH_ID to PairBondLocalPath.BLUETOOTH_NAME,
+            PairBondLocalPath.ETHERNET_ID to PairBondLocalPath.ETHERNET_NAME,
         ).forEach { (pathId, displayName) ->
             val card = card()
             card.addView(title(displayName))
-            card.addView(subtitle("パス設定: 自動ボンディング（常時使用）"))
+            card.addView(subtitle("パス設定: 自動ボンディング（利用可能な経路を使用）"))
             val stats = statsByPath[pathId]
             card.addView(
                 subtitle(
-                    stats?.let(::formatPeerStats)
-                        ?: "Pair & ShareのVPN接続中にリレーへ直接接続します",
+                    stats?.let { formatPeerStats(it, localPathStatus(it)) }
+                        ?: "状態: 未接続（Pair & Shareの受信接続開始後に確認できます）",
                 ),
             )
             localPathsContainer.addView(card)
         }
+    }
+
+    private fun localPathStatus(stats: PairSharePeerStats): String = when {
+        !stats.pathReady -> "未接続（${stats.status}）"
+        stats.status == "劣化中" -> "リレーに接続済み（劣化中）"
+        else -> "リレーに接続済み（通信可能）"
     }
 
     private fun renderPending(items: List<PairSharePending>) {
@@ -232,10 +240,10 @@ class PairShareFragment : Fragment() {
         }
     }
 
-    private fun formatPeerStats(stats: PairSharePeerStats): String {
+    private fun formatPeerStats(stats: PairSharePeerStats, status: String = stats.status): String {
         val rtt = stats.rttMillis?.let { it.toString() + " ms" } ?: "--"
         val loss = (stats.lossPermille / 10.0).toString() + "%"
-        return "状態: " + stats.status +
+        return "状態: " + status +
             "  ↑" + formatRate(stats.txBytesPerSecond) +
             "  ↓" + formatRate(stats.rxBytesPerSecond) +
             "  RTT " + rtt +

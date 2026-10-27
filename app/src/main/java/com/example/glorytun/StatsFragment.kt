@@ -96,10 +96,7 @@ class StatsFragment : Fragment() {
     }
 
     private fun observeViewModel() {
-        viewModel.wifiKBs.observe(viewLifecycleOwner) {
-            updateGraphForFilter(currentFilter)
-        }
-        viewModel.simKBs.observe(viewLifecycleOwner) {
+        viewModel.realtimeUpdated.observe(viewLifecycleOwner) {
             updateGraphForFilter(currentFilter)
         }
     }
@@ -141,12 +138,9 @@ class StatsFragment : Fragment() {
             PairShareTrafficMonitor.usageSince(requireContext(), cutoffMs).totalBytes,
         )
 
-        // historicalPoints（時間集計）とtrafficHistory（現セッション毎秒）をマージ
-        // trafficHistoryの最初のタイムスタンプより前のhistoricalPointsのみ使用して二重カウントを防ぐ
-        val realtimeStart = viewModel.trafficHistory.firstOrNull()?.timestamp ?: Long.MAX_VALUE
-        val filtered = viewModel.historicalPoints.filter {
-            it.timestamp >= cutoffMs && it.timestamp < realtimeStart
-        } + viewModel.trafficHistory.filter { it.timestamp >= cutoffMs }
+        // 保存済み時間帯の生サンプルは保存通知時に取り除く。
+        val filtered = viewModel.historicalPoints.filter { it.timestamp >= cutoffMs } +
+            viewModel.trafficHistory.filter { it.timestamp >= cutoffMs }
 
         // 統計計算（生データ使用）
         if (filtered.isEmpty()) {
@@ -158,7 +152,10 @@ class StatsFragment : Fragment() {
                 else -> 24
             }
             statsGraph.xAxisLabels = buildXLabels(filter, now)
-            statsGraph.setData(List(emptyBinCount) { 0f }, List(emptyBinCount) { 0f })
+            statsGraph.setData(
+                List(emptyBinCount) { 0f }, List(emptyBinCount) { 0f },
+                totalData = List(emptyBinCount) { 0f },
+            )
             tvAvgSpeed.text = "-- kbps"
             tvMaxThroughput.text = "-- kbps"
             tvWifiTotal.text = "0 B"
@@ -167,32 +164,24 @@ class StatsFragment : Fragment() {
             return
         }
 
-        val avgWifi = filtered.map { it.wifiKBs }.average().toFloat()
-        val avgSim  = filtered.map { it.simKBs }.average().toFloat()
-        tvAvgSpeed.text = viewModel.formatBps(avgWifi + avgSim)
+        val wifiBytes = filtered.sumOf { it.measuredWifiBytes }
+        val simBytes = filtered.sumOf { it.measuredSimBytes }
+        val totalBytes = filtered.sumOf { it.measuredTotalBytes }
+        val observedMillis = filtered.sumOf { it.durationMillis.coerceAtLeast(0L) }
+        val averageKBs = if (observedMillis > 0L) {
+            (totalBytes / 1_024.0 / (observedMillis / 1_000.0)).toFloat()
+        } else 0f
+        tvAvgSpeed.text = viewModel.formatBps(averageKBs)
+        tvMaxThroughput.text = viewModel.formatBps(filtered.maxOf { it.peakCombinedKBs })
 
-        val maxWifi = filtered.maxOf { it.wifiKBs }
-        val maxSim  = filtered.maxOf { it.simKBs }
-        tvMaxThroughput.text = viewModel.formatBps(maxWifi + maxSim)
-
-        // フィルター期間の合計バイト数を計算
-        // historicalPoints（時間集計）は KB/s × 3600s × 1024 = バイト
-        // trafficHistory（毎秒サンプル）は KB/s × 1s × 1024 = バイト
-        var wifiBytes = 0L
-        var simBytes = 0L
-        filtered.forEach { point ->
-            val multiplier = if (point.timestamp < realtimeStart) 3600L * 1024L else 1024L
-            wifiBytes += (point.wifiKBs * multiplier).toLong()
-            simBytes  += (point.simKBs  * multiplier).toLong()
-        }
         tvWifiTotal.text = viewModel.formatBytes(wifiBytes)
         tvSimTotal.text  = viewModel.formatBytes(simBytes)
-        tvTotalData.text = viewModel.formatBytes(wifiBytes + simBytes)
+        tvTotalData.text = viewModel.formatBytes(totalBytes)
 
         // グラフ用ビン集計（合計バイト数）
-        val (wifiBins, simBins) = aggregateToBins(filter, filtered, now, realtimeStart)
+        val (wifiBins, simBins, totalBins) = aggregateToBins(filter, filtered, now)
         statsGraph.xAxisLabels = buildXLabels(filter, now)
-        statsGraph.setData(wifiBins, simBins)
+        statsGraph.setData(wifiBins, simBins, totalData = totalBins)
     }
 
     /**
@@ -202,19 +191,18 @@ class StatsFragment : Fragment() {
      * 1m → 月の日数ビン（1日単位）
      * 1y → 12ビン（1ヶ月単位）
      *
-     * historicalPoints（時間集計）: KB/s × 3600 × 1024 = バイト
-     * trafficHistory（毎秒サンプル）: KB/s × 1 × 1024 = バイト
+     * 保存済み・未保存の各サンプルから実際のバイト差分を合算する。
      */
     private fun aggregateToBins(
         filter: String,
         filtered: List<TrafficPoint>,
         now: Long,
-        realtimeStart: Long
-    ): Pair<List<Float>, List<Float>> {
-        fun toBytes(point: TrafficPoint): Pair<Float, Float> {
-            val multiplier = if (point.timestamp < realtimeStart) 3600f * 1024f else 1024f
-            return Pair(point.wifiKBs * multiplier, point.simKBs * multiplier)
-        }
+    ): Triple<List<Float>, List<Float>, List<Float>> {
+        fun toBytes(point: TrafficPoint): Triple<Float, Float, Float> = Triple(
+            point.measuredWifiBytes.toFloat(),
+            point.measuredSimBytes.toFloat(),
+            point.measuredTotalBytes.toFloat(),
+        )
 
         return when (filter) {
             "1d" -> {
@@ -240,27 +228,31 @@ class StatsFragment : Fragment() {
                 val daysInMonth = Calendar.getInstance().getActualMaximum(Calendar.DAY_OF_MONTH)
                 val wifiBins = FloatArray(daysInMonth)
                 val simBins  = FloatArray(daysInMonth)
+                val totalBins = FloatArray(daysInMonth)
                 filtered.forEach { point ->
                     val c = Calendar.getInstance().apply { timeInMillis = point.timestamp }
                     val idx = (c.get(Calendar.DAY_OF_MONTH) - 1).coerceIn(0, daysInMonth - 1)
-                    val (w, s) = toBytes(point)
+                    val (w, s, total) = toBytes(point)
                     wifiBins[idx] += w
                     simBins[idx]  += s
+                    totalBins[idx] += total
                 }
-                Pair(wifiBins.toList(), simBins.toList())
+                Triple(wifiBins.toList(), simBins.toList(), totalBins.toList())
             }
             "1y" -> {
                 val wifiBins = FloatArray(12)
                 val simBins  = FloatArray(12)
+                val totalBins = FloatArray(12)
                 filtered.forEach { point ->
                     val idx = Calendar.getInstance().apply { timeInMillis = point.timestamp }.get(Calendar.MONTH)
-                    val (w, s) = toBytes(point)
+                    val (w, s, total) = toBytes(point)
                     wifiBins[idx] += w
                     simBins[idx]  += s
+                    totalBins[idx] += total
                 }
-                Pair(wifiBins.toList(), simBins.toList())
+                Triple(wifiBins.toList(), simBins.toList(), totalBins.toList())
             }
-            else -> Pair(emptyList(), emptyList())
+            else -> Triple(emptyList(), emptyList(), emptyList())
         }
     }
 
@@ -269,17 +261,19 @@ class StatsFragment : Fragment() {
         bins: Int,
         startMs: Long,
         binMs: Long,
-        toBytes: (TrafficPoint) -> Pair<Float, Float>
-    ): Pair<List<Float>, List<Float>> {
+        toBytes: (TrafficPoint) -> Triple<Float, Float, Float>
+    ): Triple<List<Float>, List<Float>, List<Float>> {
         val wifiBins = FloatArray(bins)
         val simBins  = FloatArray(bins)
+        val totalBins = FloatArray(bins)
         data.forEach { point ->
             val idx = ((point.timestamp - startMs) / binMs).toInt().coerceIn(0, bins - 1)
-            val (w, s) = toBytes(point)
+            val (w, s, total) = toBytes(point)
             wifiBins[idx] += w
             simBins[idx]  += s
+            totalBins[idx] += total
         }
-        return Pair(wifiBins.toList(), simBins.toList())
+        return Triple(wifiBins.toList(), simBins.toList(), totalBins.toList())
     }
 
     /**

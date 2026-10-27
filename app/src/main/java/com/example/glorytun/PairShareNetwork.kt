@@ -39,10 +39,14 @@ object PairShareNetwork {
      * egress path.
      */
     fun activeCellular(context: Context): Network? {
+        return activeInternetNetwork(context, NetworkCapabilities.TRANSPORT_CELLULAR)
+    }
+
+    private fun activeInternetNetwork(context: Context, transport: Int): Network? {
         val manager = context.getSystemService(ConnectivityManager::class.java)
         return manager.allNetworks.firstOrNull { network ->
             manager.getNetworkCapabilities(network)?.let { capabilities ->
-                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
+                capabilities.hasTransport(transport) &&
                     capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
                     capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             } == true
@@ -93,27 +97,83 @@ object PairShareNetwork {
         .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
         .build()
 
-    /** Keeps this device's SIM available while Wi-Fi is the Android default route. */
-    class CellularLease(context: Context) : Closeable {
-        private val manager = context.applicationContext.getSystemService(ConnectivityManager::class.java)
+    /** Tracks network changes while a socket is being opened or already bound. */
+    internal class LeaseNetworkState<T : Any, S : Closeable>(initial: T? = null) {
+        private var selected: T? = initial
+        private var bound: T? = null
+        private var socket: S? = null
+        private var closed = false
 
-        @Volatile
-        private var network: Network? = activeCellular(context)
+        @Synchronized
+        fun onAvailable(network: T): S? {
+            if (closed) return null
+            selected = network
+            if (bound != null && bound != network) {
+                bound = null
+                return socket.also { socket = null }
+            }
+            return null
+        }
+
+        @Synchronized
+        fun onLost(network: T): S? {
+            if (selected == network) selected = null
+            if (bound == network) {
+                bound = null
+                return socket.also { socket = null }
+            }
+            return null
+        }
+
+        @Synchronized
+        fun current(): T? = selected
+
+        @Synchronized
+        fun accept(network: T, candidate: S): Boolean {
+            if (closed || selected != network) return false
+            bound = network
+            socket = candidate
+            return true
+        }
+
+        @Synchronized
+        fun isBoundAvailable(): Boolean = !closed && bound != null && bound == selected
+
+        @Synchronized
+        fun isClosed(): Boolean = closed
+
+        @Synchronized
+        fun close(): S? {
+            closed = true
+            selected = null
+            bound = null
+            return socket.also { socket = null }
+        }
+    }
+
+    /** Keeps an internet transport available even when another is the default route. */
+    class InternetLease(
+        context: Context,
+        transport: Int,
+        private val label: String,
+    ) : Closeable {
+        private val manager = context.applicationContext.getSystemService(ConnectivityManager::class.java)
+        private val state = LeaseNetworkState<Network, Socket>(activeInternetNetwork(context, transport))
 
         private val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(available: Network) {
-                network = available
+                state.onAvailable(available)?.let { runCatching { it.close() } }
             }
 
             override fun onLost(lost: Network) {
-                if (network == lost) network = null
+                state.onLost(lost)?.let { runCatching { it.close() } }
             }
         }
 
         init {
             manager.requestNetwork(
                 NetworkRequest.Builder()
-                    .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    .addTransportType(transport)
                     .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                     .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                     .build(),
@@ -122,22 +182,29 @@ object PairShareNetwork {
         }
 
         fun openSocket(host: String, port: Int): Socket {
+            require(port in 1..65535)
             val deadline = SystemClock.elapsedRealtime() + CELLULAR_CONNECT_TIMEOUT_MILLIS
-            var selected = network
-            while (selected == null && SystemClock.elapsedRealtime() < deadline) {
+            var selected = state.current()
+            while (selected == null && !state.isClosed() && SystemClock.elapsedRealtime() < deadline) {
                 Thread.sleep(NETWORK_POLL_MILLIS)
-                selected = network
+                selected = state.current()
             }
-            return openNetworkSocket(
-                selected ?: throw IOException("自端末のSIM回線を開始できません"),
-                host,
-                port,
-            )
+            val selectedNetwork = selected ?: throw IOException("自端末の${label}回線を開始できません")
+            val socket = openNetworkSocket(selectedNetwork, host, port)
+            if (!state.accept(selectedNetwork, socket)) {
+                runCatching { socket.close() }
+                throw IOException("自端末の${label}回線が切断されました")
+            }
+            return socket
         }
 
+        fun hasSelectedNetwork(): Boolean = state.current() != null
+
+        fun isBoundNetworkAvailable(): Boolean = state.isBoundAvailable()
+
         override fun close() {
+            state.close()?.let { runCatching { it.close() } }
             runCatching { manager.unregisterNetworkCallback(callback) }
-            network = null
         }
     }
 
