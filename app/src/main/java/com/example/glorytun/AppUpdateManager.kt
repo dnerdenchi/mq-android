@@ -33,6 +33,7 @@ class AppUpdateManager(private val context: Context) {
         private const val KEY_LAST_AUTO_CHECK_AT = "last_auto_check_at"
         private const val KEY_INCLUDE_PRERELEASES = "include_prereleases"
         private const val AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
+        private const val DEVELOPMENT_RELEASE_TAG = "development"
     }
 
     fun includePrereleases(): Boolean = context
@@ -244,7 +245,10 @@ class AppUpdateManager(private val context: Context) {
     private fun parseReleaseList(releases: JSONArray, includePrereleases: Boolean): List<UpdateInfo> {
         return (0 until releases.length()).mapNotNull { index ->
             val release = releases.optJSONObject(index) ?: return@mapNotNull null
-            if (!includePrereleases && release.optBoolean("prerelease", false)) return@mapNotNull null
+            val isDevelopmentRelease = release.optString("tag_name") == DEVELOPMENT_RELEASE_TAG
+            if (!includePrereleases && (release.optBoolean("prerelease", false) || isDevelopmentRelease)) {
+                return@mapNotNull null
+            }
             parseRelease(release)
         }
     }
@@ -278,7 +282,9 @@ class AppUpdateManager(private val context: Context) {
         if (apkName.isBlank()) return null
 
         val tagName = json.optString("tag_name").trim()
-        val versionName = SemanticVersion.extract(tagName) ?: tagName.removePrefix("v")
+        val versionName = SemanticVersion.extract(tagName)
+            ?: SemanticVersion.extract(apkName)
+            ?: tagName.removePrefix("v")
         return UpdateInfo(
             versionName = versionName,
             releaseName = json.optString("name").ifBlank { tagName },
@@ -287,9 +293,10 @@ class AppUpdateManager(private val context: Context) {
             apkUrl = apkUrl,
             fileName = apkName,
             sha256 = apkSha256,
-            isPrerelease = json.optBoolean("prerelease", false),
+            isPrerelease = json.optBoolean("prerelease", false) || tagName == DEVELOPMENT_RELEASE_TAG,
         )
     }
+
 }
 
 data class UpdateInfo(

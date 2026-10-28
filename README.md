@@ -248,4 +248,4 @@ mqvpn との接続部分は、Android アプリ側の設定変換と VPN service
 
 公開する APK は GitHub Releases に添付します。アプリ内 updater は GitHub Releases の最新 release と APK asset を参照します。
 
-リリース時は `app/build.gradle` の `versionCode` / `versionName` を更新し、semantic versioning に沿った tag と release 名を使ってください。
+安定版のリリースでは `app/build.gradle` の `versionCode` / `versionName` を更新し、semantic versioning に沿った tag と release 名を使ってください。開発版は専用の `development` release を1つ使い、更新ごとにAPKを差し替えます。差し替えるたびに `versionCode` と `versionName` を増やし、APKファイル名にも `versionName` を含めてください。アプリ内更新機能はAPKファイル名から開発版のバージョンを読み取ります。

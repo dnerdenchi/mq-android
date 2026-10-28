@@ -50,6 +50,7 @@ class AdGuardProxyService : MqvpnVpnService() {
     private val clientExecutor: ExecutorService = Executors.newCachedThreadPool()
     private val statsHandler = Handler(Looper.getMainLooper())
     private val statsLock = Any()
+    private val adGuardAutomationLock = Any()
     private var statsRunning = false
     private val sourcePort = AtomicInteger(FIRST_EPHEMERAL_PORT)
     private val udpIpId = AtomicInteger((System.nanoTime() and 0xffff).toInt())
@@ -78,6 +79,7 @@ class AdGuardProxyService : MqvpnVpnService() {
     @Volatile private var wifiLimited = false
     @Volatile private var simLimited = false
     @Volatile private var pairShareMode = false
+    @Volatile private var adGuardAutomationForSession = false
 
     private val statsRunnable = object : Runnable {
         override fun run() {
@@ -163,6 +165,7 @@ class AdGuardProxyService : MqvpnVpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        restoreAdGuardProxyOffIfNeeded()
         hourlyTrafficRecorder = TrafficHourRecorder(HourlyTrafficSink(this)::save)
         bandwidthEnforcer = BandwidthEnforcer(this, ::setPathRateLimits)
         pairShareRepository = PairShareRepository(this)
@@ -183,7 +186,17 @@ class AdGuardProxyService : MqvpnVpnService() {
                 if (isRunning.get()) sendProxyState() else stopSelf(startId)
                 if (isRunning.get()) START_STICKY else START_NOT_STICKY
             }
-            else -> if (isRunning.get()) START_STICKY else START_NOT_STICKY
+            else -> {
+                if (intent == null) {
+                    restoreAdGuardProxyOffIfNeeded()
+                    stopSelf(startId)
+                    START_NOT_STICKY
+                } else if (isRunning.get()) {
+                    START_STICKY
+                } else {
+                    START_NOT_STICKY
+                }
+            }
         }
     }
 
@@ -191,6 +204,7 @@ class AdGuardProxyService : MqvpnVpnService() {
         if (!isRunning.compareAndSet(false, true)) return
 
         if (intent.getBooleanExtra(GlorytunConstants.EXTRA_PAIR_SHARE_RECEIVE, false)) {
+            adGuardAutomationForSession = false
             if (!pairShareRepository.isReceivingEnabled()) {
                 Log.w(TAG, "PairBond receive was requested while receiving is disabled")
                 isRunning.set(false)
@@ -218,6 +232,7 @@ class AdGuardProxyService : MqvpnVpnService() {
         }
 
         pairShareMode = false
+        adGuardAutomationForSession = AdGuardAutomation.isEnabled(this)
 
         val config = runCatching { MqvpnConfigFactory.fromIntent(this, intent) }
             .getOrElse { error ->
@@ -236,14 +251,22 @@ class AdGuardProxyService : MqvpnVpnService() {
     }
 
     private fun stopProxy() {
-        if (!isRunning.getAndSet(false)) {
+        val wasRunning = isRunning.getAndSet(false)
+        val wasPairShareMode = pairShareMode
+        pairShareMode = false
+        synchronized(adGuardAutomationLock) {
+            adGuardAutomationForSession = false
+            if (!wasPairShareMode && AdGuardAutomation.isProxyActive(this)) {
+                AdGuardAutomation.setProxyEnabled(this, enabled = false)
+            }
+        }
+
+        if (!wasRunning) {
             sendState(ConnectionStates.DISCONNECTED)
             stopSelf()
             return
         }
 
-        val wasPairShareMode = pairShareMode
-        pairShareMode = false
         closeLocalProxy()
         closeConnections()
         closePairShareConnections()
@@ -322,6 +345,12 @@ class AdGuardProxyService : MqvpnVpnService() {
     private fun stopProxyAfterTunnelClosed() {
         if (pairShareMode) return
         isRunning.set(false)
+        synchronized(adGuardAutomationLock) {
+            adGuardAutomationForSession = false
+            if (AdGuardAutomation.isProxyActive(this)) {
+                AdGuardAutomation.setProxyEnabled(this, enabled = false)
+            }
+        }
         closeLocalProxy()
         closeConnections()
         stopStats()
@@ -340,17 +369,37 @@ class AdGuardProxyService : MqvpnVpnService() {
                 ServerSocket().use { socket ->
                     socket.reuseAddress = true
                     socket.bind(InetSocketAddress(InetAddress.getByName(LOOPBACK_HOST), port))
-                    serverSocket = socket
-                    Log.i(TAG, "AdGuard mqvpn proxy listening on $LOOPBACK_HOST:$port")
-                    val route = if (pairShareMode) "ペア端末経由" else "mqvpn 経由"
-                    updateNotification("$LOOPBACK_HOST:$port $route")
-                    sendState(ConnectionStates.PROXY_CONNECTED)
+                    val proxyStarted = synchronized(adGuardAutomationLock) {
+                        if (!isRunning.get()) {
+                            false
+                        } else {
+                            serverSocket = socket
+                            Log.i(TAG, "AdGuard mqvpn proxy listening on $LOOPBACK_HOST:$port")
+                            val route = if (pairShareMode) "ペア端末経由" else "mqvpn 経由"
+                            updateNotification("$LOOPBACK_HOST:$port $route")
+                            if (!pairShareMode && adGuardAutomationForSession) {
+                                AdGuardAutomation.enableProxyForSession(
+                                    context = this@AdGuardProxyService,
+                                    automationRequested = adGuardAutomationForSession,
+                                    sessionIsActive = {
+                                        isRunning.get() && !pairShareMode && serverSocket === socket
+                                    },
+                                )
+                            }
+                            sendState(ConnectionStates.PROXY_CONNECTED)
+                            true
+                        }
+                    }
+                    if (!proxyStarted) return@use
 
                     while (isRunning.get()) {
                         val client = try {
                             socket.accept()
                         } catch (e: IOException) {
-                            if (isRunning.get()) Log.w(TAG, "Proxy accept failed", e)
+                            if (isRunning.get()) {
+                                Log.w(TAG, "Proxy accept failed", e)
+                                stopProxy()
+                            }
                             break
                         }
                         clientExecutor.execute { handleClient(client) }
@@ -990,6 +1039,17 @@ class AdGuardProxyService : MqvpnVpnService() {
         acceptExecutor.shutdownNow()
         clientExecutor.shutdownNow()
         super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (isRunning.get() && !pairShareMode && adGuardAutomationForSession) stopProxy()
+        super.onTaskRemoved(rootIntent)
+    }
+
+    private fun restoreAdGuardProxyOffIfNeeded() {
+        synchronized(adGuardAutomationLock) {
+            AdGuardAutomation.restoreProxyOffIfNeeded(this)
+        }
     }
 
     companion object {

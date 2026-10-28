@@ -2,11 +2,15 @@ package com.example.glorytun
 
 import android.content.Context
 import android.os.Bundle
+import android.text.InputType
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.fragment.app.Fragment
@@ -70,6 +74,8 @@ class SettingsFragment : Fragment() {
                 else "AdGuard 側で BondVPN を除外し 127.0.0.1:$proxyPort を設定"
         }
 
+        setupAdGuardAutomation(view, proxyPort)
+
         // ダークモード / ライトモード トグル
         val appearancePref = requireContext().getSharedPreferences(GlorytunConstants.PREFS_APPEARANCE, Context.MODE_PRIVATE)
         val switchDarkMode = view.findViewById<SwitchMaterial>(R.id.switch_dark_mode)
@@ -85,6 +91,90 @@ class SettingsFragment : Fragment() {
                 if (isChecked) AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
             )
         }
+    }
+
+    private fun setupAdGuardAutomation(view: View, proxyPort: Int) {
+        val context = requireContext()
+        val autoSwitch = view.findViewById<SwitchMaterial>(R.id.switch_adguard_automation)
+        val subtitle = view.findViewById<TextView>(R.id.tv_adguard_automation_subtitle)
+        val passwordButton = view.findViewById<MaterialButton>(R.id.btn_adguard_automation_password)
+        var updatingSwitch = false
+
+        fun updateSubtitle(enabled: Boolean) {
+            val passwordReady = AdGuardAutomation.hasPassword(context)
+            subtitle.text = when {
+                enabled && passwordReady -> "接続時にAdGuardをON、切断時にOFF。127.0.0.1:$proxyPort のプロキシ登録が必要です"
+                enabled -> "パスワード未設定です。AdGuard自動化パスワードを登録してください"
+                else -> "互換モード接続中だけAdGuardの送信プロキシを有効にします"
+            }
+            passwordButton.text = if (passwordReady) {
+                "AdGuard自動化パスワードを変更"
+            } else {
+                "AdGuard自動化パスワードを設定"
+            }
+        }
+
+        autoSwitch.isChecked = AdGuardAutomation.isEnabled(context)
+        updateSubtitle(autoSwitch.isChecked)
+        autoSwitch.setOnCheckedChangeListener { button, enabled ->
+            if (updatingSwitch) return@setOnCheckedChangeListener
+            if (enabled && !AdGuardAutomation.hasPassword(context)) {
+                updatingSwitch = true
+                button.isChecked = false
+                updatingSwitch = false
+                showAdGuardPasswordDialog {
+                    AdGuardAutomation.setEnabled(context, true)
+                    updatingSwitch = true
+                    button.isChecked = true
+                    updatingSwitch = false
+                    updateSubtitle(true)
+                }
+                return@setOnCheckedChangeListener
+            }
+
+            AdGuardAutomation.setEnabled(context, enabled)
+            updateSubtitle(enabled)
+        }
+
+        passwordButton.setOnClickListener {
+            showAdGuardPasswordDialog { updateSubtitle(autoSwitch.isChecked) }
+        }
+    }
+
+    private fun showAdGuardPasswordDialog(onSaved: () -> Unit) {
+        val context = requireContext()
+        val input = EditText(context).apply {
+            hint = "AdGuardの自動化パスワード"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setSingleLine(true)
+        }
+        val padding = (24 * resources.displayMetrics.density).toInt()
+        val inputContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(padding, padding / 2, padding, 0)
+            addView(input, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ))
+        }
+
+        AlertDialog.Builder(context)
+            .setTitle("AdGuard自動化パスワード")
+            .setMessage("AdGuardの設定に表示される自動化パスワードを入力してください。端末内に暗号化して保存します。接続中に再入力した場合は、切断時のOFF要求にも新しい値を使います。OFFにならない場合は正しいパスワードを再入力すると要求を再送します。")
+            .setView(inputContainer)
+            .setNegativeButton("キャンセル", null)
+            .setPositiveButton("保存") { _, _ ->
+                val password = input.text?.toString().orEmpty()
+                if (password.isBlank()) {
+                    Toast.makeText(context, "パスワードを入力してください", Toast.LENGTH_SHORT).show()
+                } else if (AdGuardAutomation.savePassword(context, password)) {
+                    onSaved()
+                    Toast.makeText(context, "パスワードを保存しました", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "パスワードを保存できませんでした", Toast.LENGTH_LONG).show()
+                }
+            }
+            .show()
     }
 
     private fun setupUpdateControls(view: View) {
