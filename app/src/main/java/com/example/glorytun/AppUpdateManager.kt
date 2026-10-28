@@ -13,34 +13,57 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.DigestInputStream
+import java.security.MessageDigest
 
 class AppUpdateManager(private val context: Context) {
 
     companion object {
-        private const val LATEST_RELEASE_API_URL =
-            "https://api.github.com/repos/dnerdenchi/glorytun-android/releases/latest"
+        private const val RELEASES_API_URL =
+            "https://api.github.com/repos/dnerdenchi/mq-android/releases"
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         private const val REQUEST_TIMEOUT_MS = 15_000
         private const val PREFS_NAME = "AppUpdatePrefs"
         private const val KEY_LAST_AUTO_CHECK_AT = "last_auto_check_at"
+        private const val KEY_INCLUDE_PRERELEASES = "include_prereleases"
         private const val AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
     }
 
-    suspend fun checkForUpdate(): UpdateCheckResult = withContext(Dispatchers.IO) {
+    fun includePrereleases(): Boolean = context
+        .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        .getBoolean(KEY_INCLUDE_PRERELEASES, false)
+
+    fun setIncludePrereleases(enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_INCLUDE_PRERELEASES, enabled)
+            .apply()
+    }
+
+    suspend fun checkForUpdate(
+        includePrereleases: Boolean = includePrereleases(),
+    ): UpdateCheckResult = withContext(Dispatchers.IO) {
         try {
-            val response = getText(LATEST_RELEASE_API_URL)
-            val latestRelease = parseRelease(response)
-            if (latestRelease == null) {
+            val candidates = getReleaseCandidates(includePrereleases)
+            if (candidates.isEmpty()) {
                 UpdateCheckResult.Error("GitHub Releases に APK が見つかりませんでした")
-            } else if (isNewerVersion(latestRelease.versionName, BuildConfig.VERSION_NAME)) {
-                UpdateCheckResult.UpdateAvailable(latestRelease)
             } else {
-                UpdateCheckResult.NoUpdate
+                val latestUpdate = candidates
+                    .filter {
+                        SemanticVersion.compare(it.versionName, BuildConfig.VERSION_NAME)
+                            ?.let { order -> order > 0 } == true
+                    }
+                    .maxWithOrNull { left, right ->
+                        SemanticVersion.compare(left.versionName, right.versionName) ?: 0
+                    }
+                if (latestUpdate == null) UpdateCheckResult.NoUpdate
+                else UpdateCheckResult.UpdateAvailable(latestUpdate)
             }
         } catch (e: Exception) {
             UpdateCheckResult.Error(toUserMessage(e))
@@ -49,14 +72,27 @@ class AppUpdateManager(private val context: Context) {
 
     suspend fun downloadApk(updateInfo: UpdateInfo): File = withContext(Dispatchers.IO) {
         val outputDir = File(context.getExternalFilesDir(null), "updates").apply { mkdirs() }
-        val outputFile = File(outputDir, updateInfo.fileName)
+        val safeFileName = updateInfo.fileName.substringAfterLast('/')
+            .takeIf { it.matches(Regex("[A-Za-z0-9._-]+\\.apk", RegexOption.IGNORE_CASE)) }
+            ?: throw IOException("GitHub Releases の APK 名が不正です")
+        val outputFile = File(outputDir, safeFileName)
         val connection = openConnection(updateInfo.apkUrl)
         try {
-            connection.inputStream.use { input ->
+            val digest = MessageDigest.getInstance("SHA-256")
+            DigestInputStream(connection.inputStream, digest).use { input ->
                 outputFile.outputStream().use { output ->
                     input.copyTo(output)
                 }
             }
+            val actualDigest = digest.digest().toHexString()
+            if (!actualDigest.equals(updateInfo.sha256, ignoreCase = true)) {
+                throw IOException(
+                    "APKの検証に失敗しました。ダウンロード中にファイルが破損した可能性があります。もう一度お試しください",
+                )
+            }
+        } catch (error: Exception) {
+            outputFile.delete()
+            throw error
         } finally {
             connection.disconnect()
         }
@@ -83,6 +119,7 @@ class AppUpdateManager(private val context: Context) {
     ) {
         val message = buildString {
             append("新しいバージョン ${updateInfo.versionName} が利用できます。")
+            if (updateInfo.isPrerelease) append("\n\nプレリリース版です。")
             if (updateInfo.releaseNotes.isNotBlank()) {
                 append("\n\n")
                 append(updateInfo.releaseNotes.take(700))
@@ -90,7 +127,7 @@ class AppUpdateManager(private val context: Context) {
         }
 
         AlertDialog.Builder(activity)
-            .setTitle("アップデートがあります")
+            .setTitle(if (updateInfo.isPrerelease) "プレリリース版があります" else "アップデートがあります")
             .setMessage(message)
             .setPositiveButton("ダウンロードして更新") { _, _ ->
                 if (!canRequestPackageInstalls(activity)) {
@@ -192,52 +229,66 @@ class AppUpdateManager(private val context: Context) {
         }
     }
 
-    private fun parseRelease(jsonText: String): UpdateInfo? {
-        val json = JSONObject(jsonText)
+    private fun getReleaseCandidates(includePrereleases: Boolean): List<UpdateInfo> {
+        val candidates = mutableListOf<UpdateInfo>()
+        var page = 1
+
+        while (true) {
+            val releases = JSONArray(getText("$RELEASES_API_URL?per_page=100&page=$page"))
+            candidates += parseReleaseList(releases, includePrereleases)
+            if (releases.length() < 100) return candidates
+            page++
+        }
+    }
+
+    private fun parseReleaseList(releases: JSONArray, includePrereleases: Boolean): List<UpdateInfo> {
+        return (0 until releases.length()).mapNotNull { index ->
+            val release = releases.optJSONObject(index) ?: return@mapNotNull null
+            if (!includePrereleases && release.optBoolean("prerelease", false)) return@mapNotNull null
+            parseRelease(release)
+        }
+    }
+
+    private fun parseRelease(json: JSONObject): UpdateInfo? {
         val assets = json.optJSONArray("assets") ?: return null
         var apkName = ""
         var apkUrl = ""
+        var apkSha256 = ""
 
         for (i in 0 until assets.length()) {
             val asset = assets.getJSONObject(i)
             val name = asset.optString("name")
-            if (name.endsWith(".apk", ignoreCase = true)) {
-                apkName = name
-                apkUrl = asset.optString("browser_download_url")
-                break
-            }
+            if (!name.endsWith(".apk", ignoreCase = true)) continue
+
+            val candidateUrl = asset.optString("browser_download_url")
+            val candidateDigest = asset.optString("digest").removePrefix("sha256:")
+            val candidateUri = Uri.parse(candidateUrl)
+            val hasValidDigest = candidateDigest.matches(Regex("[0-9a-fA-F]{64}"))
+            val isGitHubReleaseAsset = candidateUri.scheme == "https" &&
+                candidateUri.host.equals("github.com", ignoreCase = true) &&
+                candidateUri.path?.startsWith("/dnerdenchi/mq-android/releases/download/") == true
+            if (!hasValidDigest || !isGitHubReleaseAsset) continue
+
+            apkName = name
+            apkUrl = candidateUrl
+            apkSha256 = candidateDigest
+            break
         }
 
-        if (apkUrl.isBlank()) return null
+        if (apkName.isBlank()) return null
 
         val tagName = json.optString("tag_name").trim()
+        val versionName = SemanticVersion.extract(tagName) ?: tagName.removePrefix("v")
         return UpdateInfo(
-            versionName = tagName.removePrefix("v").ifBlank { tagName },
+            versionName = versionName,
             releaseName = json.optString("name").ifBlank { tagName },
             releaseNotes = json.optString("body"),
             releasePageUrl = json.optString("html_url"),
             apkUrl = apkUrl,
-            fileName = apkName.ifBlank { "BondVPN-$tagName.apk" }
+            fileName = apkName,
+            sha256 = apkSha256,
+            isPrerelease = json.optBoolean("prerelease", false),
         )
-    }
-
-    private fun isNewerVersion(latestVersion: String, currentVersion: String): Boolean {
-        val latestParts = latestVersion.extractVersionParts()
-        val currentParts = currentVersion.extractVersionParts()
-        val maxSize = maxOf(latestParts.size, currentParts.size)
-
-        for (i in 0 until maxSize) {
-            val latest = latestParts.getOrElse(i) { 0 }
-            val current = currentParts.getOrElse(i) { 0 }
-            if (latest != current) return latest > current
-        }
-        return false
-    }
-
-    private fun String.extractVersionParts(): List<Int> {
-        return Regex("\\d+").findAll(this)
-            .mapNotNull { it.value.toIntOrNull() }
-            .toList()
     }
 }
 
@@ -247,8 +298,14 @@ data class UpdateInfo(
     val releaseNotes: String,
     val releasePageUrl: String,
     val apkUrl: String,
-    val fileName: String
+    val fileName: String,
+    val sha256: String,
+    val isPrerelease: Boolean = false,
 )
+
+private fun ByteArray.toHexString(): String = joinToString("") { byte ->
+    "%02x".format(byte.toInt() and 0xff)
+}
 
 sealed class UpdateCheckResult {
     data class UpdateAvailable(val updateInfo: UpdateInfo) : UpdateCheckResult()

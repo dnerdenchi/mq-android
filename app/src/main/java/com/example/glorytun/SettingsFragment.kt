@@ -91,9 +91,28 @@ class SettingsFragment : Fragment() {
         val updateManager = AppUpdateManager(requireContext().applicationContext)
         val statusText = view.findViewById<TextView>(R.id.tv_update_status)
         val checkButton = view.findViewById<MaterialButton>(R.id.btn_check_update)
+        val prereleaseSwitch = view.findViewById<SwitchMaterial>(R.id.switch_include_prereleases)
+        val prereleaseRow = view.findViewById<View>(R.id.row_include_prereleases)
 
         view.findViewById<TextView>(R.id.tv_app_version)?.text = BuildConfig.VERSION_NAME
         view.findViewById<TextView>(R.id.tv_mqvpn_version)?.text = MqvpnSdk.getVersion()
+        prereleaseSwitch.isChecked = updateManager.includePrereleases()
+        statusText?.text = if (prereleaseSwitch.isChecked) {
+            "プレリリース版を含めて更新を確認します"
+        } else {
+            "安定版の更新だけを確認します"
+        }
+        prereleaseSwitch.setOnCheckedChangeListener { _, enabled ->
+            updateManager.setIncludePrereleases(enabled)
+            statusText?.text = if (enabled) {
+                "プレリリース版を含めて更新を確認します"
+            } else {
+                "安定版の更新だけを確認します"
+            }
+        }
+        prereleaseRow.setOnClickListener {
+            prereleaseSwitch.isChecked = !prereleaseSwitch.isChecked
+        }
 
         checkButton?.setOnClickListener {
             val activity = activity as? AppCompatActivity ?: return@setOnClickListener
@@ -103,7 +122,8 @@ class SettingsFragment : Fragment() {
             viewLifecycleOwner.lifecycleScope.launch {
                 when (val result = updateManager.checkForUpdate()) {
                     is UpdateCheckResult.UpdateAvailable -> {
-                        statusText?.text = "バージョン ${result.updateInfo.versionName} が利用できます"
+                        val channel = if (result.updateInfo.isPrerelease) "（プレリリース）" else ""
+                        statusText?.text = "バージョン ${result.updateInfo.versionName}$channel が利用できます"
                         updateManager.showUpdateDialog(
                             activity,
                             result.updateInfo,
@@ -111,7 +131,11 @@ class SettingsFragment : Fragment() {
                         )
                     }
                     UpdateCheckResult.NoUpdate -> {
-                        statusText?.text = "現在のバージョン ${BuildConfig.VERSION_NAME} が最新版です"
+                        statusText?.text = if (updateManager.includePrereleases()) {
+                            "現在のバージョン ${BuildConfig.VERSION_NAME} は選択した更新チャンネルの最新版です"
+                        } else {
+                            "現在のバージョン ${BuildConfig.VERSION_NAME} が最新版です"
+                        }
                     }
                     is UpdateCheckResult.Error -> {
                         statusText?.text = result.message
