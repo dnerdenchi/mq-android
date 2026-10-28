@@ -30,8 +30,8 @@ internal fun usageBarAxis(value: Float): UsageBarAxis {
         else -> value.toDouble()
     }
     val target = safeValue / 6.0
-    var scale = 1_073_741_824.0
-    var step = scale / 2.0
+    var scale = 1_024.0
+    var step = scale
     while (step < target) {
         val matching = doubleArrayOf(1.0, 2.0, 5.0)
             .map { scale * it }
