@@ -15,8 +15,8 @@ android {
         applicationId "com.example.glorytun"
         minSdk 26
         targetSdk 34
-        versionCode 32
-        versionName "1.17.0-beta.1"
+        versionCode 33
+        versionName "1.17.0"
         buildConfigField "boolean", "DEVELOPMENT_BUILD", developmentBuild.toString()
 
         ndk {
