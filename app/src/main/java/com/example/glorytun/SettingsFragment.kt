@@ -212,8 +212,12 @@ class SettingsFragment : Fragment() {
             viewLifecycleOwner.lifecycleScope.launch {
                 when (val result = updateManager.checkForUpdate()) {
                     is UpdateCheckResult.UpdateAvailable -> {
-                        val channel = if (result.updateInfo.isPrerelease) "（プレリリース）" else ""
-                        statusText?.text = "バージョン ${result.updateInfo.versionName}$channel が利用できます"
+                        statusText?.text = if (result.updateInfo.isDevelopmentRelease) {
+                            "開発版のアップデートが利用できます"
+                        } else {
+                            val channel = if (result.updateInfo.isPrerelease) "（プレリリース）" else ""
+                            "バージョン ${result.updateInfo.versionName}$channel が利用できます"
+                        }
                         updateManager.showUpdateDialog(
                             activity,
                             result.updateInfo,

@@ -34,11 +34,13 @@ class AppUpdateManager(private val context: Context) {
         private const val KEY_INCLUDE_PRERELEASES = "include_prereleases"
         private const val AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
         private const val DEVELOPMENT_RELEASE_TAG = "development"
+        private val RELEASE_VERSION_CODE_PATTERN =
+            Regex("<!--\\s*updater-version-code:\\s*(\\d+)\\s*-->")
     }
 
     fun includePrereleases(): Boolean = context
         .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        .getBoolean(KEY_INCLUDE_PRERELEASES, false)
+        .getBoolean(KEY_INCLUDE_PRERELEASES, BuildConfig.DEVELOPMENT_BUILD)
 
     fun setIncludePrereleases(enabled: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -55,13 +57,26 @@ class AppUpdateManager(private val context: Context) {
             if (candidates.isEmpty()) {
                 UpdateCheckResult.Error("GitHub Releases に APK が見つかりませんでした")
             } else {
+                val installedApkSha256 = installedApkSha256()
+                val installedVersionCode = installedVersionCode()
                 val latestUpdate = candidates
                     .filter {
-                        SemanticVersion.compare(it.versionName, BuildConfig.VERSION_NAME)
-                            ?.let { order -> order > 0 } == true
+                        if (it.isDevelopmentRelease) {
+                            isDevelopmentUpdate(it, installedApkSha256, installedVersionCode)
+                        } else {
+                            isRegularReleaseInstallable(it, installedVersionCode) &&
+                                SemanticVersion.compare(it.versionName, BuildConfig.VERSION_NAME)
+                                    ?.let { order -> order > 0 } == true
+                        }
                     }
                     .maxWithOrNull { left, right ->
-                        SemanticVersion.compare(left.versionName, right.versionName) ?: 0
+                        when {
+                            left.isDevelopmentRelease && !right.isDevelopmentRelease ->
+                                SemanticVersion.compare(left.versionName, right.versionName) ?: -1
+                            !left.isDevelopmentRelease && right.isDevelopmentRelease ->
+                                SemanticVersion.compare(left.versionName, right.versionName) ?: 1
+                            else -> SemanticVersion.compare(left.versionName, right.versionName) ?: 0
+                        }
                     }
                 if (latestUpdate == null) UpdateCheckResult.NoUpdate
                 else UpdateCheckResult.UpdateAvailable(latestUpdate)
@@ -118,17 +133,30 @@ class AppUpdateManager(private val context: Context) {
         updateInfo: UpdateInfo,
         scope: CoroutineScope
     ) {
+        val releaseNotes = updateInfo.releaseNotes
+            .replace(RELEASE_VERSION_CODE_PATTERN, "")
+            .trim()
         val message = buildString {
-            append("新しいバージョン ${updateInfo.versionName} が利用できます。")
+            if (updateInfo.isDevelopmentRelease) {
+                append("新しい開発版が利用できます。")
+            } else {
+                append("新しいバージョン ${updateInfo.versionName} が利用できます。")
+            }
             if (updateInfo.isPrerelease) append("\n\nプレリリース版です。")
-            if (updateInfo.releaseNotes.isNotBlank()) {
+            if (releaseNotes.isNotBlank()) {
                 append("\n\n")
-                append(updateInfo.releaseNotes.take(700))
+                append(releaseNotes.take(700))
             }
         }
 
         AlertDialog.Builder(activity)
-            .setTitle(if (updateInfo.isPrerelease) "プレリリース版があります" else "アップデートがあります")
+            .setTitle(
+                when {
+                    updateInfo.isDevelopmentRelease -> "開発版のアップデートがあります"
+                    updateInfo.isPrerelease -> "プレリリース版があります"
+                    else -> "アップデートがあります"
+                },
+            )
             .setMessage(message)
             .setPositiveButton("ダウンロードして更新") { _, _ ->
                 if (!canRequestPackageInstalls(activity)) {
@@ -153,6 +181,7 @@ class AppUpdateManager(private val context: Context) {
         try {
             Toast.makeText(activity, "APK をダウンロードしています", Toast.LENGTH_SHORT).show()
             val apkFile = downloadApk(updateInfo)
+            validateUpdatePackage(activity, apkFile)
             startInstall(activity, apkFile)
         } catch (e: Exception) {
             Toast.makeText(
@@ -175,6 +204,25 @@ class AppUpdateManager(private val context: Context) {
         }
         activity.startActivity(installIntent)
     }
+
+    private fun validateUpdatePackage(activity: AppCompatActivity, apkFile: File) {
+        val downloadedPackage = activity.packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0)
+            ?: throw IOException("ダウンロードしたファイルをAPKとして読み取れません")
+        if (downloadedPackage.packageName != activity.packageName) {
+            throw IOException("ダウンロードしたAPKはBondVPNの更新ファイルではありません")
+        }
+
+        val installedPackage = activity.packageManager.getPackageInfo(activity.packageName, 0)
+        val downloadedVersionCode = downloadedPackage.compatVersionCode()
+        val installedVersionCode = installedPackage.compatVersionCode()
+        if (downloadedVersionCode < installedVersionCode) {
+            throw IOException("ダウンロードしたAPKはインストール済みのアプリより古いため更新できません")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun android.content.pm.PackageInfo.compatVersionCode(): Long =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) longVersionCode else versionCode.toLong()
 
     private fun canRequestPackageInstalls(activity: AppCompatActivity): Boolean {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
@@ -206,6 +254,43 @@ class AppUpdateManager(private val context: Context) {
             connection.disconnect()
         }
     }
+
+    private fun installedApkSha256(): String? = runCatching {
+        val installedApk = File(context.applicationInfo.sourceDir)
+        val digest = MessageDigest.getInstance("SHA-256")
+        installedApk.inputStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        digest.digest().toHexString()
+    }.getOrNull()
+
+    private fun isDevelopmentUpdate(
+        updateInfo: UpdateInfo,
+        installedApkSha256: String?,
+        installedVersionCode: Long?,
+    ): Boolean {
+        val downloadedVersionCode = updateInfo.versionCode ?: return false
+        installedVersionCode ?: return false
+        if (downloadedVersionCode < installedVersionCode) return false
+        if (!installedApkSha256.isNullOrBlank()) {
+            return !updateInfo.sha256.equals(installedApkSha256, ignoreCase = true)
+        }
+        return downloadedVersionCode > installedVersionCode
+    }
+
+    private fun isRegularReleaseInstallable(updateInfo: UpdateInfo, installedVersionCode: Long?): Boolean {
+        val downloadedVersionCode = updateInfo.versionCode ?: return true
+        return installedVersionCode == null || downloadedVersionCode >= installedVersionCode
+    }
+
+    private fun installedVersionCode(): Long? = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).compatVersionCode()
+    }.getOrNull()
 
     private fun openConnection(url: String): HttpURLConnection {
         val connection = URL(url).openConnection() as HttpURLConnection
@@ -282,19 +367,38 @@ class AppUpdateManager(private val context: Context) {
         if (apkName.isBlank()) return null
 
         val tagName = json.optString("tag_name").trim()
-        val versionName = SemanticVersion.extract(tagName)
-            ?: SemanticVersion.extract(apkName)
-            ?: tagName.removePrefix("v")
+        val isDevelopmentRelease = tagName == DEVELOPMENT_RELEASE_TAG
+        val releaseNotes = json.optString("body")
+        val versionName = if (isDevelopmentRelease) {
+            extractApkVersion(apkName) ?: DEVELOPMENT_RELEASE_TAG
+        } else {
+            SemanticVersion.extract(tagName) ?: tagName.removePrefix("v")
+        }
+        val versionCode = RELEASE_VERSION_CODE_PATTERN.find(releaseNotes)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toLongOrNull()
         return UpdateInfo(
             versionName = versionName,
             releaseName = json.optString("name").ifBlank { tagName },
-            releaseNotes = json.optString("body"),
+            releaseNotes = releaseNotes,
             releasePageUrl = json.optString("html_url"),
             apkUrl = apkUrl,
             fileName = apkName,
             sha256 = apkSha256,
-            isPrerelease = json.optBoolean("prerelease", false) || tagName == DEVELOPMENT_RELEASE_TAG,
+            isPrerelease = json.optBoolean("prerelease", false) || isDevelopmentRelease,
+            isDevelopmentRelease = isDevelopmentRelease,
+            versionCode = versionCode,
         )
+    }
+
+    private fun extractApkVersion(apkName: String): String? {
+        val withoutExtension = apkName.substringBeforeLast('.', apkName)
+        val withoutBuildType = withoutExtension.replace(
+            Regex("-(debug|release)$", RegexOption.IGNORE_CASE),
+            "",
+        )
+        return SemanticVersion.extract(withoutBuildType)
     }
 
 }
@@ -308,6 +412,8 @@ data class UpdateInfo(
     val fileName: String,
     val sha256: String,
     val isPrerelease: Boolean = false,
+    val isDevelopmentRelease: Boolean = false,
+    val versionCode: Long? = null,
 )
 
 private fun ByteArray.toHexString(): String = joinToString("") { byte ->
