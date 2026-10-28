@@ -2,15 +2,14 @@ package com.example.glorytun
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.util.AttributeSet
 import android.view.View
 
 /**
- * WiFi、SIM、Pair & Share の通信スループット (KB/s) を表示するカスタムView。
- * - 青: WiFi (TX+RX合計)
- * - オレンジ: SIM (TX+RX合計)
+ * 各経路の通信スループット（KiB/s）を表示するカスタム View。
  * - barMode=true のとき棒グラフ（WiFi下段・SIM上段の積み上げ棒）を表示
  */
 class TrafficGraphView @JvmOverloads constructor(
@@ -33,9 +32,12 @@ class TrafficGraphView @JvmOverloads constructor(
     private val wifiRates = ArrayDeque<Float>()
     private val simRates  = ArrayDeque<Float>()
     private val pairShareRates = ArrayDeque<Float>()
+    private val bluetoothRates = ArrayDeque<Float>()
+    private val ethernetRates = ArrayDeque<Float>()
+    private val totalRates = ArrayDeque<Float>()
 
     private val wifiLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color       = context.getColor(R.color.wifi_color)
+        color       = context.getColor(R.color.tertiary)
         strokeWidth = 4f
         style       = Paint.Style.STROKE
         strokeJoin  = Paint.Join.ROUND
@@ -43,7 +45,7 @@ class TrafficGraphView @JvmOverloads constructor(
     }
 
     private val simLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color       = context.getColor(R.color.sim_color)
+        color       = context.getColor(R.color.secondary)
         strokeWidth = 4f
         style       = Paint.Style.STROKE
         strokeJoin  = Paint.Join.ROUND
@@ -58,14 +60,27 @@ class TrafficGraphView @JvmOverloads constructor(
         strokeCap   = Paint.Cap.ROUND
     }
 
+    private val bluetoothLinePaint = Paint(wifiLinePaint).apply { color = Color.rgb(171, 71, 188) }
+    private val ethernetLinePaint = Paint(wifiLinePaint).apply { color = Color.rgb(66, 165, 245) }
+    private val totalLinePaint = Paint(wifiLinePaint).apply {
+        color = context.getColor(R.color.on_surface)
+        strokeWidth = 6f
+    }
+
     private val wifiBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = context.getColor(R.color.wifi_color)
+        color = context.getColor(R.color.tertiary)
         style = Paint.Style.FILL
     }
 
     private val simBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = context.getColor(R.color.sim_color)
+        color = context.getColor(R.color.secondary)
         style = Paint.Style.FILL
+    }
+
+    private val totalBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = context.getColor(R.color.on_surface)
+        strokeWidth = 2f
+        style = Paint.Style.STROKE
     }
 
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -101,13 +116,30 @@ class TrafficGraphView @JvmOverloads constructor(
         textAlign = Paint.Align.CENTER
     }
 
-    fun addDataPoint(wifiKBs: Float, simKBs: Float, pairShareKBs: Float = 0f) {
-        if (wifiRates.size >= MAX_POINTS) wifiRates.removeFirst()
-        if (simRates.size  >= MAX_POINTS) simRates.removeFirst()
-        if (pairShareRates.size >= MAX_POINTS) pairShareRates.removeFirst()
-        wifiRates.addLast(wifiKBs.coerceAtLeast(0f))
-        simRates.addLast(simKBs.coerceAtLeast(0f))
-        pairShareRates.addLast(pairShareKBs.coerceAtLeast(0f))
+    private fun safeGraphValue(value: Float): Float = when {
+        value.isNaN() || value <= 0f -> 0f
+        value.isInfinite() -> Float.MAX_VALUE
+        else -> value
+    }
+
+    fun addDataPoint(
+        wifiKBs: Float,
+        simKBs: Float,
+        pairShareKBs: Float = 0f,
+        bluetoothKBs: Float = 0f,
+        ethernetKBs: Float = 0f,
+        totalKBs: Float = wifiKBs + simKBs + bluetoothKBs + ethernetKBs + pairShareKBs,
+    ) {
+        fun append(queue: ArrayDeque<Float>, value: Float) {
+            if (queue.size >= MAX_POINTS) queue.removeFirst()
+            queue.addLast(safeGraphValue(value))
+        }
+        append(wifiRates, wifiKBs)
+        append(simRates, simKBs)
+        append(pairShareRates, pairShareKBs)
+        append(bluetoothRates, bluetoothKBs)
+        append(ethernetRates, ethernetKBs)
+        append(totalRates, totalKBs)
         invalidate()
     }
 
@@ -115,6 +147,9 @@ class TrafficGraphView @JvmOverloads constructor(
         wifiRates.clear()
         simRates.clear()
         pairShareRates.clear()
+        bluetoothRates.clear()
+        ethernetRates.clear()
+        totalRates.clear()
         invalidate()
     }
 
@@ -122,13 +157,22 @@ class TrafficGraphView @JvmOverloads constructor(
         wifiData: List<Float>,
         simData: List<Float>,
         pairShareData: List<Float> = emptyList(),
+        bluetoothData: List<Float> = emptyList(),
+        ethernetData: List<Float> = emptyList(),
+        totalData: List<Float> = emptyList(),
     ) {
         wifiRates.clear()
         simRates.clear()
         pairShareRates.clear()
-        wifiData.forEach { wifiRates.addLast(it.coerceAtLeast(0f)) }
-        simData.forEach { simRates.addLast(it.coerceAtLeast(0f)) }
-        pairShareData.forEach { pairShareRates.addLast(it.coerceAtLeast(0f)) }
+        bluetoothRates.clear()
+        ethernetRates.clear()
+        totalRates.clear()
+        wifiData.forEach { wifiRates.addLast(safeGraphValue(it)) }
+        simData.forEach { simRates.addLast(safeGraphValue(it)) }
+        pairShareData.forEach { pairShareRates.addLast(safeGraphValue(it)) }
+        bluetoothData.forEach { bluetoothRates.addLast(safeGraphValue(it)) }
+        ethernetData.forEach { ethernetRates.addLast(safeGraphValue(it)) }
+        totalData.forEach { totalRates.addLast(safeGraphValue(it)) }
         invalidate()
     }
 
@@ -162,38 +206,24 @@ class TrafficGraphView @JvmOverloads constructor(
         // Y軸スケール計算
         // バーモード（積み上げ棒）の場合は各ビンの合計値の最大を使う
         val rawMax = if (barMode && wifiRates.size == simRates.size && wifiRates.isNotEmpty()) {
-            (wifiRates.indices).maxOf { i -> wifiRates[i] + simRates[i] }
+            (wifiRates.indices).maxOf { i ->
+                maxOf(wifiRates[i] + simRates[i], totalRates.getOrNull(i) ?: 0f)
+            }
         } else {
-            (wifiRates.toList() + simRates.toList() + pairShareRates.toList()).maxOrNull() ?: 0f
+            (wifiRates.toList() + simRates.toList() + pairShareRates.toList() +
+                bluetoothRates.toList() + ethernetRates.toList() + totalRates.toList())
+                .maxOrNull() ?: 0f
         }
 
         // グラフ描画上限 (plotMax) を決定
         // バーモード: ステップの倍数に切り上げた値を上限にする
-        // リアルタイム: 最低1Mbps(125 KB/s)、超えたら1.25倍
-        val plotMax: Float
-        val gridValues: List<Float>
-        if (barMode) {
-            val gb = 1_073_741_824f
-            val stepCandidates = listOf(
-                0.5f * gb, 1f * gb, 2f * gb, 5f * gb,
-                10f * gb, 20f * gb, 50f * gb, 100f * gb,
-                200f * gb, 500f * gb, 1000f * gb
-            )
-            val step = stepCandidates.first { s -> (rawMax / s).toInt() <= 6 }
-            plotMax = kotlin.math.ceil(rawMax / step).toInt().coerceAtLeast(1) * step
-            val vals = mutableListOf<Float>()
-            var v = step
-            while (v <= plotMax + step * 0.01f) { vals.add(v); v += step }
-            gridValues = vals
+        // リアルタイム: 公式 mqvpn と同じ 1/2/5 ステップ、最低 10 Kbps
+        val (plotMax, gridValues) = if (barMode) {
+            val axis = usageBarAxis(rawMax)
+            axis.maximum to axis.ticks
         } else {
-            val mbps1 = 125f
-            val mbps3 = 375f
-            plotMax = if (rawMax < mbps3) mbps3 else rawMax * 1.25f
-            gridValues = if (plotMax <= mbps3 * 1.05f) {
-                listOf(mbps1, mbps1 * 2f, mbps3)
-            } else {
-                listOf(plotMax / 3f, plotMax * 2f / 3f, plotMax)
-            }
+            val maximum = ceilNiceBandwidth(kotlin.math.ceil(rawMax.toDouble() * 8192.0).toLong()) / 8192f
+            maximum to listOf(maximum / 2f, maximum)
         }
 
         // 水平グリッド線とY軸ラベル
@@ -207,9 +237,11 @@ class TrafficGraphView @JvmOverloads constructor(
         // ベースライン
         val baseY = padT + plotPadT + plotH
         canvas.drawLine(padL, baseY, w - padR, baseY, baselinePaint)
+        if (!barMode) canvas.drawText("0", 2f, baseY, labelPaint)
 
         // データがない場合
-        if (wifiRates.isEmpty() && simRates.isEmpty() && pairShareRates.isEmpty()) {
+        if (wifiRates.isEmpty() && simRates.isEmpty() && pairShareRates.isEmpty() &&
+            bluetoothRates.isEmpty() && ethernetRates.isEmpty() && totalRates.isEmpty()) {
             if (!barMode) {
                 canvas.drawText(
                     "接続するとデータが表示されます",
@@ -231,6 +263,9 @@ class TrafficGraphView @JvmOverloads constructor(
             drawPolyline(canvas, wifiRates, plotMax, padL, padT, graphW, plotH, plotPadT, wifiLinePaint)
             drawPolyline(canvas, simRates,  plotMax, padL, padT, graphW, plotH, plotPadT, simLinePaint)
             drawPolyline(canvas, pairShareRates, plotMax, padL, padT, graphW, plotH, plotPadT, pairShareLinePaint)
+            drawPolyline(canvas, bluetoothRates, plotMax, padL, padT, graphW, plotH, plotPadT, bluetoothLinePaint)
+            drawPolyline(canvas, ethernetRates, plotMax, padL, padT, graphW, plotH, plotPadT, ethernetLinePaint)
+            drawPolyline(canvas, totalRates, plotMax, padL, padT, graphW, plotH, plotPadT, totalLinePaint)
         }
 
         canvas.restore()
@@ -291,6 +326,10 @@ class TrafficGraphView @JvmOverloads constructor(
             if (simH > 0f) {
                 canvas.drawRect(x, baseY - wifiH - simH, x + barWidth, baseY - wifiH, simBarPaint)
             }
+            val totalH = totalRates.getOrNull(i)?.let { plotH * (it / maxRate) } ?: 0f
+            if (totalH > 0f) {
+                canvas.drawRect(x, baseY - totalH, x + barWidth, baseY, totalBarPaint)
+            }
         }
     }
 
@@ -328,13 +367,6 @@ class TrafficGraphView @JvmOverloads constructor(
         canvas.drawPath(path, paint)
     }
 
-    /** Y軸ラベルのフォーマット関数。差し替え可能（デフォルトはKB/s → bps換算表示） */
-    var yLabelFormatter: (Float) -> String = { kbs ->
-        val kbps = kbs * 8f
-        when {
-            kbps >= 1_000_000f -> "%.1fGbps".format(kbps / 1_000_000f)
-            kbps >= 1_000f     -> "%.0fMbps".format(kbps / 1_000f)
-            else               -> "%.0fKbps".format(kbps)
-        }
-    }
+    /** Y軸ラベルのフォーマット関数。通常は KiB/s を bps に換算する。 */
+    var yLabelFormatter: (Float) -> String = { kbs -> formatBandwidthBps((kbs * 8192f).toLong()) }
 }

@@ -18,6 +18,7 @@ import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.TunnelInfo
+import com.mqvpn.sdk.core.model.VpnStats
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.FileInputStream
@@ -48,6 +49,9 @@ class AdGuardProxyService : MqvpnVpnService() {
     private val acceptExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val clientExecutor: ExecutorService = Executors.newCachedThreadPool()
     private val statsHandler = Handler(Looper.getMainLooper())
+    private val statsLock = Any()
+    private val adGuardAutomationLock = Any()
+    private var statsRunning = false
     private val sourcePort = AtomicInteger(FIRST_EPHEMERAL_PORT)
     private val udpIpId = AtomicInteger((System.nanoTime() and 0xffff).toInt())
     private val connections = ConcurrentHashMap<TcpTunnelKey, ProxyTcpTunnelConnection>()
@@ -57,6 +61,8 @@ class AdGuardProxyService : MqvpnVpnService() {
     private val pathTrafficAccumulator = PathTrafficAccumulator()
     private val pairBondTrafficAccumulator = PairBondDashboardTrafficAccumulator()
     private val bandwidthHistory = BandwidthHistory(maxSamples = 1)
+    private val mqvpnTrafficDelta = MqvpnTrafficDelta()
+    private lateinit var hourlyTrafficRecorder: TrafficHourRecorder
     private lateinit var bandwidthEnforcer: BandwidthEnforcer
     private lateinit var pairShareRepository: PairShareRepository
 
@@ -66,15 +72,19 @@ class AdGuardProxyService : MqvpnVpnService() {
     @Volatile private var downlinkReader: Thread? = null
     @Volatile private var tunnelMtu: Int = GlorytunConstants.DEFAULT_MTU
     @Volatile private var latestPaths: List<PathInfo> = emptyList()
+    @Volatile private var latestStats: VpnStats? = null
     @Volatile private var dailyWifiKB = 0.0
     @Volatile private var dailySimKB = 0.0
+    @Volatile private var dailyTotalBytes = 0L
     @Volatile private var wifiLimited = false
     @Volatile private var simLimited = false
     @Volatile private var pairShareMode = false
+    @Volatile private var adGuardAutomationForSession = false
 
     private val statsRunnable = object : Runnable {
         override fun run() {
-            if (!isRunning.get()) return
+            synchronized(statsLock) {
+            if (!isRunning.get() || !statsRunning) return
             val pairUpdate = if (pairShareMode) {
                 pairBondTrafficAccumulator.update(
                     stats = PairShareCoordinator.currentPeerStats(),
@@ -85,11 +95,14 @@ class AdGuardProxyService : MqvpnVpnService() {
             } else {
                 null
             }
+            val paths = latestPaths
+            val stats = if (pairUpdate == null) latestStats else null
+            val sampleTimeMillis = System.currentTimeMillis()
             val trafficUpdate = pairUpdate?.let {
                 PathTrafficUpdate(it.totals, it.wifiDeltaKB, it.simDeltaKB)
-            } ?: pathTrafficAccumulator.update(latestPaths)
+            } ?: pathTrafficAccumulator.update(paths)
             val bandwidthSample = if (pairUpdate == null) {
-                bandwidthHistory.onTick(latestPaths, System.nanoTime()).lastOrNull()
+                bandwidthHistory.onTick(paths, System.nanoTime()).lastOrNull()
             } else {
                 null
             }
@@ -97,17 +110,36 @@ class AdGuardProxyService : MqvpnVpnService() {
                 ?.filterKeys(::isWifiInterface)?.values?.sum() ?: 0L
             val simBps = pairUpdate?.simBps ?: bandwidthSample?.perPathBps
                 ?.filterKeys(::isCellularInterface)?.values?.sum() ?: 0L
-            val bluetoothBps = bandwidthSample?.perPathBps
+            val bluetoothBps = pairUpdate?.bluetoothBps ?: bandwidthSample?.perPathBps
                 ?.filterKeys(::isBluetoothInterface)?.values?.sum() ?: 0L
-            val ethernetBps = bandwidthSample?.perPathBps
+            val ethernetBps = pairUpdate?.ethernetBps ?: bandwidthSample?.perPathBps
                 ?.filterKeys(::isEthernetInterface)?.values?.sum() ?: 0L
+            val pairBps = pairUpdate?.pairShareBps ?: 0L
+            val totalBps = pairUpdate?.let {
+                wifiBps + simBps + bluetoothBps + ethernetBps + pairBps
+            } ?: bandwidthSample?.totalBps ?: 0L
+            val durationNanos = pairUpdate?.sampleDurationNanos ?: bandwidthSample?.elapsedNanos ?: 0L
+            val wifiSampleBytes = pairUpdate?.wifiDeltaBytes ?: bandwidthSample?.perPathDeltaBytes
+                ?.filterKeys(::isWifiInterface)?.values?.sum() ?: 0L
+            val simSampleBytes = pairUpdate?.simDeltaBytes ?: bandwidthSample?.perPathDeltaBytes
+                ?.filterKeys(::isCellularInterface)?.values?.sum() ?: 0L
+            val totalDeltaBytes = pairUpdate?.let {
+                it.wifiDeltaBytes + it.simDeltaBytes + it.bluetoothDeltaBytes +
+                    it.ethernetDeltaBytes + it.pairShareDeltaBytes
+            } ?: stats?.let(mqvpnTrafficDelta::consume) ?: 0L
+            hourlyTrafficRecorder.record(
+                sampleTimeMillis, wifiSampleBytes, simSampleBytes,
+                totalDeltaBytes, durationNanos / 1_000_000L, totalBps / 8192f,
+            )
             val bandwidthStatus = bandwidthEnforcer.onTick(
-                latestPaths,
+                paths,
                 trafficUpdate.wifiDeltaKB,
                 trafficUpdate.simDeltaKB,
+                totalDeltaBytes,
             )
             dailyWifiKB = bandwidthStatus.usage.dailyWifiBytes / 1_024.0
             dailySimKB = bandwidthStatus.usage.dailySimBytes / 1_024.0
+            dailyTotalBytes = bandwidthStatus.usage.dailyTotalBytes
             wifiLimited = bandwidthStatus.wifiLimited
             simLimited = bandwidthStatus.simLimited
             broadcastTrafficStats(
@@ -116,21 +148,32 @@ class AdGuardProxyService : MqvpnVpnService() {
                 simBps,
                 bluetoothBps,
                 ethernetBps,
-                pairUpdate?.pairShareBps ?: 0L,
+                pairBps,
                 pairUpdate?.receivingPeerNames ?: emptyList(),
+                totalBps,
+                durationNanos,
+                wifiSampleBytes,
+                simSampleBytes,
+                totalDeltaBytes,
+                sampleTimeMillis,
+                stats,
             )
             statsHandler.postDelayed(this, 1000)
+            }
         }
     }
 
     override fun onCreate() {
         super.onCreate()
+        restoreAdGuardProxyOffIfNeeded()
+        hourlyTrafficRecorder = TrafficHourRecorder(HourlyTrafficSink(this)::save)
         bandwidthEnforcer = BandwidthEnforcer(this, ::setPathRateLimits)
         pairShareRepository = PairShareRepository(this)
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.i(TAG, "onStartCommand action=${intent?.action ?: "null"}")
         return when (intent?.action) {
             GlorytunConstants.ACTION_PROXY_START -> {
                 startProxy(intent, startId)
@@ -144,14 +187,29 @@ class AdGuardProxyService : MqvpnVpnService() {
                 if (isRunning.get()) sendProxyState() else stopSelf(startId)
                 if (isRunning.get()) START_STICKY else START_NOT_STICKY
             }
-            else -> if (isRunning.get()) START_STICKY else START_NOT_STICKY
+            else -> {
+                if (intent == null) {
+                    restoreAdGuardProxyOffIfNeeded()
+                    stopSelf(startId)
+                    START_NOT_STICKY
+                } else if (isRunning.get()) {
+                    START_STICKY
+                } else {
+                    START_NOT_STICKY
+                }
+            }
         }
     }
 
     private fun startProxy(intent: Intent, startId: Int) {
-        if (!isRunning.compareAndSet(false, true)) return
+        if (!isRunning.compareAndSet(false, true)) {
+            Log.w(TAG, "Ignoring proxy start because a session is already running")
+            return
+        }
 
         if (intent.getBooleanExtra(GlorytunConstants.EXTRA_PAIR_SHARE_RECEIVE, false)) {
+            adGuardAutomationForSession = AdGuardAutomation.isEnabled(this)
+            Log.i(TAG, "AdGuard automatic proxy switch captured for Pair & Share session=$adGuardAutomationForSession")
             if (!pairShareRepository.isReceivingEnabled()) {
                 Log.w(TAG, "PairBond receive was requested while receiving is disabled")
                 isRunning.set(false)
@@ -179,6 +237,8 @@ class AdGuardProxyService : MqvpnVpnService() {
         }
 
         pairShareMode = false
+        adGuardAutomationForSession = AdGuardAutomation.isEnabled(this)
+        Log.i(TAG, "AdGuard automatic proxy switch captured for session=$adGuardAutomationForSession")
 
         val config = runCatching { MqvpnConfigFactory.fromIntent(this, intent) }
             .getOrElse { error ->
@@ -197,14 +257,22 @@ class AdGuardProxyService : MqvpnVpnService() {
     }
 
     private fun stopProxy() {
-        if (!isRunning.getAndSet(false)) {
+        val wasRunning = isRunning.getAndSet(false)
+        val wasPairShareMode = pairShareMode
+        pairShareMode = false
+        synchronized(adGuardAutomationLock) {
+            adGuardAutomationForSession = false
+            if (AdGuardAutomation.isProxyActive(this)) {
+                AdGuardAutomation.setProxyEnabled(this, enabled = false)
+            }
+        }
+
+        if (!wasRunning) {
             sendState(ConnectionStates.DISCONNECTED)
             stopSelf()
             return
         }
 
-        val wasPairShareMode = pairShareMode
-        pairShareMode = false
         closeLocalProxy()
         closeConnections()
         closePairShareConnections()
@@ -267,6 +335,10 @@ class AdGuardProxyService : MqvpnVpnService() {
         latestPaths = paths
     }
 
+    override fun onStatsUpdated(stats: VpnStats) {
+        latestStats = stats
+    }
+
     override fun onLog(level: Int, message: String) {
         when (level) {
             0 -> Log.d(TAG, message)
@@ -279,6 +351,12 @@ class AdGuardProxyService : MqvpnVpnService() {
     private fun stopProxyAfterTunnelClosed() {
         if (pairShareMode) return
         isRunning.set(false)
+        synchronized(adGuardAutomationLock) {
+            adGuardAutomationForSession = false
+            if (AdGuardAutomation.isProxyActive(this)) {
+                AdGuardAutomation.setProxyEnabled(this, enabled = false)
+            }
+        }
         closeLocalProxy()
         closeConnections()
         stopStats()
@@ -297,17 +375,42 @@ class AdGuardProxyService : MqvpnVpnService() {
                 ServerSocket().use { socket ->
                     socket.reuseAddress = true
                     socket.bind(InetSocketAddress(InetAddress.getByName(LOOPBACK_HOST), port))
-                    serverSocket = socket
-                    Log.i(TAG, "AdGuard mqvpn proxy listening on $LOOPBACK_HOST:$port")
-                    val route = if (pairShareMode) "ペア端末経由" else "mqvpn 経由"
-                    updateNotification("$LOOPBACK_HOST:$port $route")
-                    sendState(ConnectionStates.PROXY_CONNECTED)
+                    val proxyStarted = synchronized(adGuardAutomationLock) {
+                        if (!isRunning.get()) {
+                            false
+                        } else {
+                            serverSocket = socket
+                            Log.i(TAG, "AdGuard mqvpn proxy listening on $LOOPBACK_HOST:$port")
+                            Log.i(
+                                TAG,
+                                "Proxy session ready: pairShare=$pairShareMode, " +
+                                    "automationRequested=$adGuardAutomationForSession",
+                            )
+                            val route = if (pairShareMode) "ペア端末経由" else "mqvpn 経由"
+                            updateNotification("$LOOPBACK_HOST:$port $route")
+                            if (adGuardAutomationForSession) {
+                                AdGuardAutomation.enableProxyForSession(
+                                    context = this@AdGuardProxyService,
+                                    automationRequested = adGuardAutomationForSession,
+                                    sessionIsActive = {
+                                        isRunning.get() && serverSocket === socket
+                                    },
+                                )
+                            }
+                            sendState(ConnectionStates.PROXY_CONNECTED)
+                            true
+                        }
+                    }
+                    if (!proxyStarted) return@use
 
                     while (isRunning.get()) {
                         val client = try {
                             socket.accept()
                         } catch (e: IOException) {
-                            if (isRunning.get()) Log.w(TAG, "Proxy accept failed", e)
+                            if (isRunning.get()) {
+                                Log.w(TAG, "Proxy accept failed", e)
+                                stopProxy()
+                            }
                             break
                         }
                         clientExecutor.execute { handleClient(client) }
@@ -703,32 +806,44 @@ class AdGuardProxyService : MqvpnVpnService() {
         localAddress = null
     }
 
-    private fun startStats() {
+    private fun startStats() { synchronized(statsLock) {
+        if (statsRunning) return
+        hourlyTrafficRecorder.flush()
         pathTrafficAccumulator.reset()
         pairBondTrafficAccumulator.reset()
         bandwidthHistory.clear()
+        mqvpnTrafficDelta.reset()
+        latestStats = null
         val bandwidthStatus = bandwidthEnforcer.onTick(latestPaths, 0f, 0f)
         dailyWifiKB = bandwidthStatus.usage.dailyWifiBytes / 1_024.0
         dailySimKB = bandwidthStatus.usage.dailySimBytes / 1_024.0
+        dailyTotalBytes = bandwidthStatus.usage.dailyTotalBytes
         wifiLimited = bandwidthStatus.wifiLimited
         simLimited = bandwidthStatus.simLimited
+        statsRunning = true
         statsHandler.removeCallbacks(statsRunnable)
         statsHandler.post(statsRunnable)
-    }
+    } }
 
-    private fun stopStats() {
+    private fun stopStats() { synchronized(statsLock) {
+        if (!statsRunning) return
+        statsRunning = false
         statsHandler.removeCallbacks(statsRunnable)
+        hourlyTrafficRecorder.flush()
         bandwidthEnforcer.stop()
         pathTrafficAccumulator.reset()
         pairBondTrafficAccumulator.reset()
         bandwidthHistory.clear()
         latestPaths = emptyList()
-    }
+        latestStats = null
+        mqvpnTrafficDelta.reset()
+    } }
 
     private fun resetProxyState() {
         latestPaths = emptyList()
         dailyWifiKB = 0.0
         dailySimKB = 0.0
+        dailyTotalBytes = 0L
         pathTrafficAccumulator.reset()
         bandwidthHistory.clear()
     }
@@ -799,6 +914,13 @@ class AdGuardProxyService : MqvpnVpnService() {
         ethernetBps: Long,
         pairShareBps: Long,
         pairSharePeerNames: List<String>,
+        totalBps: Long,
+        durationNanos: Long,
+        wifiSampleBytes: Long,
+        simSampleBytes: Long,
+        totalSampleBytes: Long,
+        sampleTimeMillis: Long,
+        stats: VpnStats?,
     ) {
         sendBroadcast(Intent(GlorytunConstants.ACTION_VPN_TRAFFIC_STATS).apply {
             setPackage(packageName)
@@ -817,6 +939,18 @@ class AdGuardProxyService : MqvpnVpnService() {
             putExtra("ethernet_bps", ethernetBps)
             putExtra("pair_share_bps", pairShareBps)
             putStringArrayListExtra("pair_share_peer_names", ArrayList(pairSharePeerNames))
+            putExtra("total_bps", totalBps)
+            putExtra("sample_duration_nanos", durationNanos)
+            putExtra("wifi_sample_bytes", wifiSampleBytes)
+            putExtra("sim_sample_bytes", simSampleBytes)
+            putExtra("total_sample_bytes", totalSampleBytes)
+            putExtra("sample_time_ms", sampleTimeMillis)
+            putExtra("sample_scope_id", hourlyTrafficRecorder.sampleScopeId)
+            putExtra("daily_total_bytes", dailyTotalBytes)
+            if (stats != null) {
+                putExtra("mqvpn_tx_bytes", stats.bytesTx)
+                putExtra("mqvpn_rx_bytes", stats.bytesRx)
+            }
             putExtra("stats_source", GlorytunConstants.STATE_SOURCE_PROXY)
             putExtra("daily_wifi_kb", dailyWifiKB)
             putExtra("daily_sim_kb", dailySimKB)
@@ -916,6 +1050,17 @@ class AdGuardProxyService : MqvpnVpnService() {
         acceptExecutor.shutdownNow()
         clientExecutor.shutdownNow()
         super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (isRunning.get() && adGuardAutomationForSession) stopProxy()
+        super.onTaskRemoved(rootIntent)
+    }
+
+    private fun restoreAdGuardProxyOffIfNeeded() {
+        synchronized(adGuardAutomationLock) {
+            AdGuardAutomation.restoreProxyOffIfNeeded(this)
+        }
     }
 
     companion object {

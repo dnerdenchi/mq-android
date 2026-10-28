@@ -50,6 +50,8 @@ data class PairSharePending(
 data class PairSharePeerStats(
     val peerId: String,
     val status: String = "待機中",
+    /** True only while this PairBond path has a live relay connection. */
+    val pathReady: Boolean = false,
     val txBytes: Long = 0L,
     val rxBytes: Long = 0L,
     val txBytesPerSecond: Long = 0L,

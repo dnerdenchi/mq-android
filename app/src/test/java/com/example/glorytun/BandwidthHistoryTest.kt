@@ -99,4 +99,30 @@ class BandwidthHistoryTest {
         history.clear()
         assertTrue(history.ifaceSlots().isEmpty())
     }
+
+    @Test
+    fun reportsMonotonicElapsedTimeAndExactDeltasForEachTransport() {
+        val history = BandwidthHistory()
+        history.onTick(
+            listOf(
+                path(iface = "wifi-1", tx = 100, rx = 200),
+                path(handle = 2, iface = "bluetooth-2", tx = 50, rx = 50),
+            ),
+            1_000_000_000L,
+        )
+        val sample = history.onTick(
+            listOf(
+                path(iface = "wifi-1", tx = 1_100, rx = 700),
+                path(handle = 2, iface = "bluetooth-2", tx = 550, rx = 50),
+            ),
+            3_000_000_000L,
+        ).last()
+
+        assertEquals(2_000_000_000L, sample.elapsedNanos)
+        assertEquals(1_500L, sample.perPathDeltaBytes["wifi-1"])
+        assertEquals(500L, sample.perPathDeltaBytes["bluetooth-2"])
+        assertEquals(6_000L, sample.perPathBps["wifi-1"])
+        assertEquals(2_000L, sample.perPathBps["bluetooth-2"])
+        assertEquals(8_000L, sample.totalBps)
+    }
 }

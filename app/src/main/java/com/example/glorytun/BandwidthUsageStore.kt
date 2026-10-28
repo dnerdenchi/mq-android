@@ -4,80 +4,66 @@ import android.content.Context
 import android.content.SharedPreferences
 import java.util.Calendar
 
-class BandwidthUsageStore(
-    context: Context,
+class BandwidthUsageStore internal constructor(
+    private val prefs: SharedPreferences,
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private var usage = loadCurrentUsage()
-    private var dirtyTicks = 0
+    constructor(context: Context, nowMillis: () -> Long = System::currentTimeMillis) : this(
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
+        nowMillis,
+    )
 
-    @Synchronized
-    fun add(wifiBytes: Long, simBytes: Long): BandwidthUsage {
-        rollPeriodsIfNeeded()
+    fun add(
+        wifiBytes: Long,
+        simBytes: Long,
+        totalBytes: Long = wifiBytes.coerceAtLeast(0L) + simBytes.coerceAtLeast(0L),
+    ): BandwidthUsage = synchronized(storeLock) {
+        val period = periodKeys(nowMillis())
+        val current = loadCurrentUsage(period)
         val safeWifi = wifiBytes.coerceAtLeast(0L)
         val safeSim = simBytes.coerceAtLeast(0L)
-        usage = usage.copy(
-            dailyWifiBytes = usage.dailyWifiBytes + safeWifi,
-            dailySimBytes = usage.dailySimBytes + safeSim,
-            monthlyWifiBytes = usage.monthlyWifiBytes + safeWifi,
-            monthlySimBytes = usage.monthlySimBytes + safeSim,
+        val next = current.copy(
+            dailyWifiBytes = current.dailyWifiBytes + safeWifi,
+            dailySimBytes = current.dailySimBytes + safeSim,
+            monthlyWifiBytes = current.monthlyWifiBytes + safeWifi,
+            monthlySimBytes = current.monthlySimBytes + safeSim,
+            dailyTotalBytes = current.dailyTotalBytes + totalBytes.coerceAtLeast(0L),
         )
-        if (++dirtyTicks >= SAVE_EVERY_TICKS) persist()
-        return usage
+        persist(next, period)
+        next
     }
 
-    @Synchronized
-    fun snapshot(): BandwidthUsage {
-        rollPeriodsIfNeeded()
-        return usage
+    fun snapshot(): BandwidthUsage = synchronized(storeLock) {
+        loadCurrentUsage(periodKeys(nowMillis()))
     }
 
-    @Synchronized
-    fun flush() {
-        if (dirtyTicks > 0) persist()
-    }
+    // Each addition is persisted immediately, as it was with SAVE_EVERY_TICKS = 1.
+    fun flush() = Unit
 
-    private fun loadCurrentUsage(): BandwidthUsage {
-        val now = periodKeys(nowMillis())
+    private fun loadCurrentUsage(now: PeriodKeys): BandwidthUsage {
         val storedDay = prefs.getLong(KEY_DAY, Long.MIN_VALUE)
         val storedMonth = prefs.getLong(KEY_MONTH, Long.MIN_VALUE)
+        val wifi = if (storedDay == now.day) prefs.getLong(KEY_DAILY_WIFI, 0L) else 0L
+        val sim = if (storedDay == now.day) prefs.getLong(KEY_DAILY_SIM, 0L) else 0L
         return BandwidthUsage(
-            dailyWifiBytes = if (storedDay == now.day) prefs.getLong(KEY_DAILY_WIFI, 0L) else 0L,
-            dailySimBytes = if (storedDay == now.day) prefs.getLong(KEY_DAILY_SIM, 0L) else 0L,
+            dailyWifiBytes = wifi,
+            dailySimBytes = sim,
             monthlyWifiBytes = if (storedMonth == now.month) prefs.getLong(KEY_MONTHLY_WIFI, 0L) else 0L,
             monthlySimBytes = if (storedMonth == now.month) prefs.getLong(KEY_MONTHLY_SIM, 0L) else 0L,
+            dailyTotalBytes = if (storedDay == now.day) prefs.getLong(KEY_DAILY_TOTAL, wifi + sim) else 0L,
         )
     }
 
-    private fun rollPeriodsIfNeeded() {
-        val now = periodKeys(nowMillis())
-        val storedDay = prefs.getLong(KEY_DAY, Long.MIN_VALUE)
-        val storedMonth = prefs.getLong(KEY_MONTH, Long.MIN_VALUE)
-        var changed = false
-
-        if (storedDay != now.day) {
-            usage = usage.copy(dailyWifiBytes = 0L, dailySimBytes = 0L)
-            changed = true
-        }
-        if (storedMonth != now.month) {
-            usage = usage.copy(monthlyWifiBytes = 0L, monthlySimBytes = 0L)
-            changed = true
-        }
-        if (changed) persist()
-    }
-
-    private fun persist() {
-        val now = periodKeys(nowMillis())
+    private fun persist(usage: BandwidthUsage, now: PeriodKeys) {
         prefs.edit()
             .putLong(KEY_DAY, now.day)
             .putLong(KEY_MONTH, now.month)
             .putLong(KEY_DAILY_WIFI, usage.dailyWifiBytes)
             .putLong(KEY_DAILY_SIM, usage.dailySimBytes)
+            .putLong(KEY_DAILY_TOTAL, usage.dailyTotalBytes)
             .putLong(KEY_MONTHLY_WIFI, usage.monthlyWifiBytes)
             .putLong(KEY_MONTHLY_SIM, usage.monthlySimBytes)
             .apply()
-        dirtyTicks = 0
     }
 
     private data class PeriodKeys(val day: Long, val month: Long)
@@ -94,13 +80,14 @@ class BandwidthUsageStore(
     }
 
     companion object {
+        private val storeLock = Any()
         private const val PREFS_NAME = "bandwidth_usage"
         private const val KEY_DAY = "period_day"
         private const val KEY_MONTH = "period_month"
         private const val KEY_DAILY_WIFI = "daily_wifi_bytes"
         private const val KEY_DAILY_SIM = "daily_sim_bytes"
+        private const val KEY_DAILY_TOTAL = "daily_total_bytes"
         private const val KEY_MONTHLY_WIFI = "monthly_wifi_bytes"
         private const val KEY_MONTHLY_SIM = "monthly_sim_bytes"
-        private const val SAVE_EVERY_TICKS = 1
     }
 }

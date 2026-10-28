@@ -90,6 +90,7 @@ data class BandwidthUsage(
     val dailySimBytes: Long = 0L,
     val monthlyWifiBytes: Long = 0L,
     val monthlySimBytes: Long = 0L,
+    val dailyTotalBytes: Long = dailyWifiBytes + dailySimBytes,
 )
 
 data class NetworkBandwidthDecision(

@@ -94,7 +94,22 @@ class MainActivity : AppCompatActivity() {
                 measuredPairShareBps = intent.getLongExtra("pair_share_bps", 0L),
                 pairSharePeerNames = intent.getStringArrayListExtra("pair_share_peer_names")
                     ?: emptyList(),
+                measuredBluetoothBps = intent.getLongExtra("bluetooth_bps", 0L),
+                measuredEthernetBps = intent.getLongExtra("ethernet_bps", 0L),
+                measuredTotalBps = intent.getLongExtra("total_bps", -1L).takeIf { it >= 0L },
+                sampleDurationNanos = intent.getLongExtra("sample_duration_nanos", -1L).takeIf { it >= 0L },
+                sampleWifiBytes = intent.getLongExtra("wifi_sample_bytes", -1L).takeIf { it >= 0L },
+                sampleSimBytes = intent.getLongExtra("sim_sample_bytes", -1L).takeIf { it >= 0L },
+                sampleTotalBytes = intent.getLongExtra("total_sample_bytes", -1L).takeIf { it >= 0L },
+                sampleTimeMillis = intent.getLongExtra("sample_time_ms", -1L).takeIf { it >= 0L },
+                sampleScopeId = intent.getStringExtra("sample_scope_id"),
             )
+            if (intent.hasExtra("mqvpn_tx_bytes") && intent.hasExtra("mqvpn_rx_bytes")) {
+                viewModel.updateMqvpnStats(
+                    intent.getLongExtra("mqvpn_tx_bytes", 0L),
+                    intent.getLongExtra("mqvpn_rx_bytes", 0L),
+                )
+            }
             viewModel.updatePathSpeeds(
                 PathSpeedSnapshot(
                     wifiActive = intent.getBooleanExtra("wifi_path_active", false),
@@ -113,7 +128,8 @@ class MainActivity : AppCompatActivity() {
                     wifiKB      = dailyWifi,
                     simKB       = intent.getDoubleExtra("daily_sim_kb", 0.0),
                     wThrottled  = intent.getBooleanExtra("wifi_throttled", false),
-                    sThrottled  = intent.getBooleanExtra("sim_throttled",  false)
+                    sThrottled  = intent.getBooleanExtra("sim_throttled",  false),
+                    totalBytes = intent.getLongExtra("daily_total_bytes", -1L).takeIf { it >= 0L },
                 )
             }
         }
@@ -130,9 +146,19 @@ class MainActivity : AppCompatActivity() {
             val point = TrafficPoint(
                 timestamp = intent.getLongExtra("timestamp", 0L),
                 wifiKBs   = intent.getFloatExtra("wifi_kbs", 0f),
-                simKBs    = intent.getFloatExtra("sim_kbs",  0f)
+                simKBs    = intent.getFloatExtra("sim_kbs",  0f),
+                durationMillis = intent.getLongExtra("duration_ms", GlorytunConstants.MILLIS_IN_HOUR),
+                wifiBytes = intent.getLongExtra("wifi_bytes", -1L).takeIf { it >= 0L },
+                simBytes = intent.getLongExtra("sim_bytes", -1L).takeIf { it >= 0L },
+                totalBytes = intent.getLongExtra("total_bytes", -1L).takeIf { it >= 0L },
+                peakCombinedKBs = intent.getFloatExtra("peak_combined_kbs", 0f),
             )
-            viewModel.addHistoricalPoint(point)
+            viewModel.addHistoricalPoint(
+                point = point,
+                sampleScopeId = intent.getStringExtra("sample_scope_id"),
+                fromMillis = intent.getLongExtra("from_time_ms", -1L).takeIf { it >= 0L },
+                throughMillis = intent.getLongExtra("through_time_ms", -1L).takeIf { it >= 0L },
+            )
         }
     }
 

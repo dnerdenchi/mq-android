@@ -74,7 +74,11 @@ object GlorytunConstants {
     const val PREFS_PROXY = "proxy_prefs"
     const val KEY_ADGUARD_PROXY_MODE_ENABLED = "adguard_proxy_mode_enabled"
     const val KEY_ADGUARD_PROXY_PORT = "adguard_proxy_port"
+    const val KEY_ADGUARD_AUTO_PROXY_ENABLED = "adguard_auto_proxy_enabled"
+    const val KEY_ADGUARD_AUTOMATION_ACTIVE = "adguard_automation_active"
+    const val KEY_ADGUARD_AUTOMATION_RECOVERY_PENDING = "adguard_automation_recovery_pending"
     const val DEFAULT_ADGUARD_PROXY_PORT = 1080
+    const val PREFS_ADGUARD_AUTOMATION = "adguard_automation_prefs"
 
     // --- Appearance Prefs ---
     const val PREFS_APPEARANCE = "appearance_prefs"

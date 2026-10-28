@@ -42,14 +42,15 @@ class PathTrafficAccumulator {
 
         paths.forEach { path ->
             val group = path.transportGroup()
-            val isPathAvailable = path.status != PathInfo.STATUS_CLOSED
-            if (isPathAvailable) {
+            val isPathAvailable = path.status == PathInfo.STATUS_ACTIVE ||
+                path.status == PathInfo.STATUS_STANDBY
+            val keepCounter = path.status != PathInfo.STATUS_CLOSED
+            if (keepCounter) {
                 activeHandles.add(path.handle)
-                if (group == TransportGroup.WIFI) {
-                    wifiActive = true
-                } else {
-                    simActive = true
-                }
+            }
+            if (isPathAvailable) {
+                wifiActive = wifiActive || group == TransportGroup.WIFI
+                simActive = simActive || group == TransportGroup.CELLULAR
                 wifiPathActive = wifiPathActive || isWifiInterface(path.iface)
                 bluetoothActive = bluetoothActive || isBluetoothInterface(path.iface)
                 ethernetActive = ethernetActive || isEthernetInterface(path.iface)
@@ -63,17 +64,21 @@ class PathTrafficAccumulator {
             if (previous != null) {
                 val deltaTx = (current.tx - previous.tx).coerceAtLeast(0L)
                 val deltaRx = (current.rx - previous.rx).coerceAtLeast(0L)
-                if (group == TransportGroup.WIFI) {
-                    cumulativeWifiTx += deltaTx
-                    cumulativeWifiRx += deltaRx
-                    wifiDeltaBytes += deltaTx + deltaRx
-                } else {
-                    cumulativeSimTx += deltaTx
-                    cumulativeSimRx += deltaRx
-                    simDeltaBytes += deltaTx + deltaRx
+                when (group) {
+                    TransportGroup.WIFI -> {
+                        cumulativeWifiTx += deltaTx
+                        cumulativeWifiRx += deltaRx
+                        wifiDeltaBytes += deltaTx + deltaRx
+                    }
+                    TransportGroup.CELLULAR -> {
+                        cumulativeSimTx += deltaTx
+                        cumulativeSimRx += deltaRx
+                        simDeltaBytes += deltaTx + deltaRx
+                    }
+                    TransportGroup.OTHER -> Unit
                 }
             }
-            if (isPathAvailable) {
+            if (keepCounter) {
                 previousByHandle[path.handle] = current
             } else {
                 previousByHandle.remove(path.handle)
@@ -108,7 +113,11 @@ class PathTrafficAccumulator {
     }
 
     private fun PathInfo.transportGroup(): TransportGroup {
-        return if (isCellularInterface(iface)) TransportGroup.CELLULAR else TransportGroup.WIFI
+        return when {
+            isWifiInterface(iface) -> TransportGroup.WIFI
+            isCellularInterface(iface) -> TransportGroup.CELLULAR
+            else -> TransportGroup.OTHER
+        }
     }
 
     private data class PathCounter(
@@ -118,7 +127,8 @@ class PathTrafficAccumulator {
 
     private enum class TransportGroup {
         WIFI,
-        CELLULAR
+        CELLULAR,
+        OTHER
     }
 }
 

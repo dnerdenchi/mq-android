@@ -17,6 +17,7 @@ import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReconnectInfo
 import com.mqvpn.sdk.core.model.TunnelInfo
+import com.mqvpn.sdk.core.model.VpnStats
 import com.mqvpn.sdk.network.NetworkMonitor
 import com.mqvpn.sdk.runtime.MqvpnPoller
 import com.mqvpn.sdk.runtime.NativeReactorWaiter
@@ -73,7 +74,9 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
                 val result = t?.tick() ?: 0
                 // Poll stats/paths and push to MqvpnManager on each tick
                 if (t != null) {
-                    manager?.updateStats(t.getStats())
+                    val stats = t.getStats()
+                    manager?.updateStats(stats)
+                    onStatsUpdated(stats)
                     val paths = t.getPaths()
                     manager?.updatePaths(paths)
                     onPathsUpdated(paths)
@@ -324,6 +327,7 @@ abstract class MqvpnVpnService : VpnService(), TunnelCallbacks {
     open fun onLog(level: Int, message: String) {}
     open fun onReconnectScheduled(delaySec: Int) {}
     open fun onPathsUpdated(paths: List<PathInfo>) {}
+    open fun onStatsUpdated(stats: VpnStats) {}
 
     /** Subclasses may own TUN packet I/O instead of using the default bridge. */
     protected open fun useDefaultTunnelIo(): Boolean = true

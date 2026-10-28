@@ -28,6 +28,7 @@ class DashboardFragment : Fragment() {
     private lateinit var tvWifiTotal: TextView
     private lateinit var tvSimTotal: TextView
     private lateinit var tvTotalData: TextView
+    private lateinit var tvSessionTraffic: TextView
     private lateinit var tvWifiThrottledBadge: TextView
     private lateinit var tvSimThrottledBadge: TextView
     private lateinit var tvPairShareSpeed: TextView
@@ -71,6 +72,7 @@ class DashboardFragment : Fragment() {
         tvWifiTotal = view.findViewById(R.id.tv_wifi_total)
         tvSimTotal = view.findViewById(R.id.tv_sim_total)
         tvTotalData = view.findViewById(R.id.tv_total_data)
+        tvSessionTraffic = view.findViewById(R.id.tv_session_traffic)
         tvWifiThrottledBadge = view.findViewById(R.id.tv_wifi_throttled_badge)
         tvSimThrottledBadge = view.findViewById(R.id.tv_sim_throttled_badge)
         tvPairShareSpeed = view.findViewById(R.id.tv_pair_share_speed)
@@ -90,6 +92,9 @@ class DashboardFragment : Fragment() {
             viewModel.realtimeWifiRates.toList(),
             viewModel.realtimeSimRates.toList(),
             viewModel.realtimePairShareRates.toList(),
+            viewModel.realtimeBluetoothRates.toList(),
+            viewModel.realtimeEthernetRates.toList(),
+            viewModel.realtimeTotalRates.toList(),
         )
 
         viewModel.connectionState.observe(viewLifecycleOwner) { state ->
@@ -97,11 +102,11 @@ class DashboardFragment : Fragment() {
         }
 
         viewModel.wifiKBs.observe(viewLifecycleOwner) { kbs ->
-            tvWifiSpeed.text = if (kbs > 0) viewModel.formatBps(kbs) else "-- kbps"
+            tvWifiSpeed.text = viewModel.formatBps(kbs)
         }
 
         viewModel.simKBs.observe(viewLifecycleOwner) { kbs ->
-            tvSimSpeed.text = if (kbs > 0) viewModel.formatBps(kbs) else "-- kbps"
+            tvSimSpeed.text = viewModel.formatBps(kbs)
         }
 
         viewModel.pairShareKBs.observe(viewLifecycleOwner) { renderPairShareTraffic(pairShareTrafficSnapshot) }
@@ -116,6 +121,13 @@ class DashboardFragment : Fragment() {
         viewModel.simDailyBytes.observe(viewLifecycleOwner) { bytes ->
             tvSimTotal.text = "今日: ${viewModel.formatBytes(bytes)}"
             updateTotalData()
+        }
+
+        viewModel.totalDailyBytes.observe(viewLifecycleOwner) { updateTotalData() }
+        viewModel.mqvpnStats.observe(viewLifecycleOwner) { stats ->
+            tvSessionTraffic.visibility = if (stats.available) View.VISIBLE else View.GONE
+            tvSessionTraffic.text = "今回のVPN通信量: ${viewModel.formatBytes(stats.totalBytes)} " +
+                "(送信 ${viewModel.formatBytes(stats.txBytes)} / 受信 ${viewModel.formatBytes(stats.rxBytes)})"
         }
 
         viewModel.wifiThrottled.observe(viewLifecycleOwner) { throttled ->
@@ -144,6 +156,9 @@ class DashboardFragment : Fragment() {
                 viewModel.realtimeWifiRates.toList(),
                 viewModel.realtimeSimRates.toList(),
                 viewModel.realtimePairShareRates.toList(),
+                viewModel.realtimeBluetoothRates.toList(),
+                viewModel.realtimeEthernetRates.toList(),
+                viewModel.realtimeTotalRates.toList(),
             )
         }
 
@@ -223,7 +238,7 @@ class DashboardFragment : Fragment() {
     }
 
     private fun updateTotalData() {
-        val total = (viewModel.wifiDailyBytes.value ?: 0L) + (viewModel.simDailyBytes.value ?: 0L)
+        val total = viewModel.totalDailyBytes.value ?: 0L
         tvTotalData.text = viewModel.formatBytes(total)
     }
 
@@ -263,7 +278,7 @@ class DashboardFragment : Fragment() {
     }
 
     private fun formatPathSpeed(bitsPerSecond: Long): String =
-        if (bitsPerSecond > 0L) viewModel.formatBps(bitsPerSecond / 8192f) else "-- kbps"
+        viewModel.formatBps(bitsPerSecond.coerceAtLeast(0L) / 8192f)
 
     private fun updateSpeedRows() {
         speedCardsRow.visibility = if (
