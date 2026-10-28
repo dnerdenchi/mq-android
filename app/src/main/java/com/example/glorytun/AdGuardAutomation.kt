@@ -63,7 +63,14 @@ object AdGuardAutomation {
         automationRequested: Boolean,
         sessionIsActive: () -> Boolean,
     ): Boolean = synchronized(stateLock) {
-        if (!automationRequested || !sessionIsActive() || !isEnabledLocked(context)) {
+        val sessionActive = sessionIsActive()
+        val settingEnabled = isEnabledLocked(context)
+        if (!automationRequested || !sessionActive || !settingEnabled) {
+            Log.w(
+                TAG,
+                "Skipping AdGuard proxy enable: requested=$automationRequested, " +
+                    "sessionActive=$sessionActive, settingEnabled=$settingEnabled",
+            )
             return@synchronized false
         }
         setProxyEnabledLocked(context, enabled = true)
@@ -105,6 +112,7 @@ object AdGuardAutomation {
                 putExtra("enable", enabled)
                 putExtra("quiet", true)
             })
+            Log.i(TAG, "Dispatched AdGuard proxy state request: enable=$enabled")
             if (!enabled) {
                 val saved = preferences.edit()
                     .putBoolean(GlorytunConstants.KEY_ADGUARD_AUTOMATION_ACTIVE, false)

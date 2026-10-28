@@ -103,9 +103,9 @@ class SettingsFragment : Fragment() {
         fun updateSubtitle(enabled: Boolean) {
             val passwordReady = AdGuardAutomation.hasPassword(context)
             subtitle.text = when {
-                enabled && passwordReady -> "接続時にAdGuardをON、切断時にOFF。127.0.0.1:$proxyPort のプロキシ登録が必要です"
-                enabled -> "パスワード未設定です。AdGuard自動化パスワードを登録してください"
-                else -> "互換モード接続中だけAdGuardの送信プロキシを有効にします"
+                enabled && passwordReady -> "接続時にAdGuardをON、切断時にOFF。AdGuard側の「詳細設定 → 自動化」をONにし、送信プロキシに127.0.0.1:${proxyPort}を登録してください"
+                enabled -> "ONですがパスワード未設定です。AdGuard側の自動化と送信プロキシ設定も確認してください"
+                else -> "自動切替OFFです。このスイッチ、AdGuard側の自動化、送信プロキシの設定が必要です"
             }
             passwordButton.text = if (passwordReady) {
                 "AdGuard自動化パスワードを変更"
@@ -122,7 +122,7 @@ class SettingsFragment : Fragment() {
                 updatingSwitch = true
                 button.isChecked = false
                 updatingSwitch = false
-                showAdGuardPasswordDialog {
+                showAdGuardPasswordDialog(proxyPort) {
                     AdGuardAutomation.setEnabled(context, true)
                     updatingSwitch = true
                     button.isChecked = true
@@ -137,11 +137,11 @@ class SettingsFragment : Fragment() {
         }
 
         passwordButton.setOnClickListener {
-            showAdGuardPasswordDialog { updateSubtitle(autoSwitch.isChecked) }
+            showAdGuardPasswordDialog(proxyPort) { updateSubtitle(autoSwitch.isChecked) }
         }
     }
 
-    private fun showAdGuardPasswordDialog(onSaved: () -> Unit) {
+    private fun showAdGuardPasswordDialog(proxyPort: Int, onSaved: () -> Unit) {
         val context = requireContext()
         val input = EditText(context).apply {
             hint = "AdGuardの自動化パスワード"
@@ -160,7 +160,7 @@ class SettingsFragment : Fragment() {
 
         AlertDialog.Builder(context)
             .setTitle("AdGuard自動化パスワード")
-            .setMessage("AdGuardの設定に表示される自動化パスワードを入力してください。端末内に暗号化して保存します。接続中に再入力した場合は、切断時のOFF要求にも新しい値を使います。OFFにならない場合は正しいパスワードを再入力すると要求を再送します。")
+            .setMessage("AdGuard側の「設定 → 一般設定 → 詳細設定 → 自動化」に表示されたパスワードを入力します。端末内に暗号化して保存します。AdGuard側の自動化をONにし、送信プロキシとしてSOCKS5 127.0.0.1:${proxyPort}を登録してください。保存後、この画面の「AdGuardプロキシを自動切替」もONにしてください。")
             .setView(inputContainer)
             .setNegativeButton("キャンセル", null)
             .setPositiveButton("保存") { _, _ ->
