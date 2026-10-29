@@ -39,7 +39,7 @@
 | :--- | :--- |
 | **対応 OS** | Android 8.0 (API 26) 以上 |
 | **対応 ABI** | `arm64-v8a` |
-| **VPN エンジン** | [mqvpn v0.18.0](https://github.com/mp0rta/mqvpn/releases/tag/v0.18.0)（経路別レート制限パッチ適用済み） |
+| **VPN エンジン** | [mqvpn v0.18.0](https://github.com/mp0rta/mqvpn/releases/tag/v0.18.0) |
 
 ---
 
@@ -120,41 +120,5 @@ sudo systemctl restart mqvpn-server
 curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
   | sudo bash -s -- --uninstall
 ```
-
-</details>
-
----
-
-## 開発・ビルド（コントリビューター向け）
-
-<details>
-<summary><b>ローカルでのビルド手順・ディレクトリ構成</b></summary>
-
-### ビルドとテスト
-
-JDK 17（または Android Studio 付属の JBR）と Gradle を使用してビルドします。
-
-```powershell
-$env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
-gradle test assembleDebug
-```
-
-生成される APK: `app/build/outputs/apk/debug/app-debug.apk`
-
-### 主要コンポーネント構成
-
-| パス | 役割 |
-| :--- | :--- |
-| `app/src/main/java/com/example/glorytun/MqvpnBondingService.kt` | VPN サービス制御・UI への状態通知 |
-| `app/src/main/java/com/example/glorytun/MqvpnConfigFactory.kt` | 接続プロファイルから `mqvpn` 設定を生成 |
-| `app/src/main/java/com/example/glorytun/AppUpdateManager.kt` | GitHub Releases 連携のアプリ内アップデーター |
-| `app/src/main/java/com/mqvpn/sdk/` | `mqvpn` Android SDK ソースコード |
-| `app/src/main/jniLibs/arm64-v8a/libmqvpn_jni.so` | `mqvpn` ネイティブブリッジ（`native-patches/` 適用済み） |
-| `server/` | サーバー設定補助スクリプトおよび PairBond リレー |
-
-### リリース運用
-
-- 安定版リリース時は `app/build.gradle` の `versionCode` / `versionName`（`0.a.b` 形式）および [CHANGELOG.md](CHANGELOG.md) を更新し、リリースノート末尾に `<!-- updater-version-code: <versionCode> -->` を記載して GitHub Releases に APK を添付します。
-- 開発版（`development` タグ）は `-PdevelopmentBuild=true` を付与してビルドし、単一の Pre-release 上の APK を差し替えて運用します。
 
 </details>
