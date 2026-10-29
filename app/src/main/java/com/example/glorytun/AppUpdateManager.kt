@@ -64,20 +64,10 @@ class AppUpdateManager(private val context: Context) {
                         if (it.isDevelopmentRelease) {
                             isDevelopmentUpdate(it, installedApkSha256, installedVersionCode)
                         } else {
-                            isRegularReleaseInstallable(it, installedVersionCode) &&
-                                SemanticVersion.compare(it.versionName, BuildConfig.VERSION_NAME)
-                                    ?.let { order -> order > 0 } == true
+                            isRegularReleaseUpdate(it, installedVersionCode)
                         }
                     }
-                    .maxWithOrNull { left, right ->
-                        when {
-                            left.isDevelopmentRelease && !right.isDevelopmentRelease ->
-                                SemanticVersion.compare(left.versionName, right.versionName) ?: -1
-                            !left.isDevelopmentRelease && right.isDevelopmentRelease ->
-                                SemanticVersion.compare(left.versionName, right.versionName) ?: 1
-                            else -> SemanticVersion.compare(left.versionName, right.versionName) ?: 0
-                        }
-                    }
+                    .maxWithOrNull(::compareUpdateCandidates)
                 if (latestUpdate == null) UpdateCheckResult.NoUpdate
                 else UpdateCheckResult.UpdateAvailable(latestUpdate)
             }
@@ -286,6 +276,31 @@ class AppUpdateManager(private val context: Context) {
     private fun isRegularReleaseInstallable(updateInfo: UpdateInfo, installedVersionCode: Long?): Boolean {
         val downloadedVersionCode = updateInfo.versionCode ?: return true
         return installedVersionCode == null || downloadedVersionCode >= installedVersionCode
+    }
+
+    private fun isRegularReleaseUpdate(updateInfo: UpdateInfo, installedVersionCode: Long?): Boolean {
+        if (!isRegularReleaseInstallable(updateInfo, installedVersionCode)) return false
+        val downloadedVersionCode = updateInfo.versionCode
+        if (downloadedVersionCode != null && installedVersionCode != null && downloadedVersionCode != installedVersionCode) {
+            return downloadedVersionCode > installedVersionCode
+        }
+        return SemanticVersion.compare(updateInfo.versionName, BuildConfig.VERSION_NAME)
+            ?.let { order -> order > 0 } == true
+    }
+
+    private fun compareUpdateCandidates(left: UpdateInfo, right: UpdateInfo): Int {
+        val leftCode = left.versionCode
+        val rightCode = right.versionCode
+        if (leftCode != null && rightCode != null && leftCode != rightCode) {
+            return leftCode.compareTo(rightCode)
+        }
+        return when {
+            left.isDevelopmentRelease && !right.isDevelopmentRelease ->
+                SemanticVersion.compare(left.versionName, right.versionName) ?: -1
+            !left.isDevelopmentRelease && right.isDevelopmentRelease ->
+                SemanticVersion.compare(left.versionName, right.versionName) ?: 1
+            else -> SemanticVersion.compare(left.versionName, right.versionName) ?: 0
+        }
     }
 
     private fun installedVersionCode(): Long? = runCatching {
